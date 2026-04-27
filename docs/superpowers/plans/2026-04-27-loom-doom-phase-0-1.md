@@ -226,21 +226,34 @@ export const WindowType = {
 
 - [ ] **Step 2: Register `GAME_LOOM` in `WINDOW_REGISTRY`**
 
-Open `/Users/justinwest/Repos/l0b0tonline/features/windows/registry.tsx` and find the `WINDOW_REGISTRY` declaration. Find an existing game entry (e.g. `GAME_MEMORY`) — copy its shape exactly, substituting LOOM-specific values.
+Open `/Users/justinwest/Repos/l0b0tonline/features/windows/registry.tsx` and find the `WINDOW_REGISTRY` declaration. Per Task 0.1's findings, **heavy games use Pattern B** (`category.kind: 'custom'` + a `render` function wrapping in `GameErrorBoundary`), and the import uses a named-export wrapper.
 
-Add this entry to `WINDOW_REGISTRY` (adjust property names to match what Task 0.1 confirmed):
+Add the import at the top of the file (next to existing icon imports):
+```typescript
+import { Gamepad2 } from 'lucide-react';  // already imported — confirm before adding
+```
+
+Add this entry to `WINDOW_REGISTRY`, modeled exactly on the `GAME_SHIP` (ShipItGame) entry that Task 0.1 quoted:
 ```typescript
 [WindowType.GAME_LOOM]: {
-  lazy: () => import('../../components/LOOMGame'),
-  category: 'game' as const,
-  icon: <span className="font-mono text-sm">L00M</span>,  // placeholder; better icon later
-  unlockFile: 'loom_archive.dat',
-  defaultSize: { width: 800, height: 600 },               // adjust if Task 0.1 found a different prop name
-  title: 'L00M.EXE',
+  component: lazy(() => import('../../components/LOOMGame').then(m => ({ default: m.LOOMGame }))),
+  category: {
+    kind: 'custom',
+    render: (Component, props) => (
+      <GameErrorBoundary name="LOOMGame">
+        <Component onClose={props.onClose ?? (() => {})} />
+      </GameErrorBoundary>
+    ),
+  },
+  icon: <Gamepad2 size={14} />,
 },
 ```
 
-Make sure the import path from `features/windows/registry.tsx` to `components/LOOMGame.tsx` is correct — most likely `'../../components/LOOMGame'` from the registry file's location, but **verify against existing entries** that import from `components/`.
+This:
+- Uses `lazy()` (already imported in this file — verify before assuming)
+- Uses `.then(m => ({ default: m.LOOMGame }))` because LOOMGame is a **named export** (matching ShipItGame / BardoGame pattern)
+- Uses `category.kind: 'custom'` and a `render` function so we control the close-button wiring (Pattern B from Task 0.1)
+- Wraps in `GameErrorBoundary` so a runtime error doesn't crash the whole J0IN 0S
 
 - [ ] **Step 3: Type-check**
 
@@ -326,22 +339,19 @@ export function BootSequence({ onComplete }: BootSequenceProps) {
 
 Create `/Users/justinwest/Repos/l0b0tonline/components/LOOMGame.tsx`:
 ```tsx
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { BootSequence } from './loom/hud/BootSequence';
 
-// WindowProps shape — adjust to match l0b0tonline's actual WindowProps interface
-// confirmed in Task 0.1. The minimal props we need for Phase 0 are id and onClose.
+// Heavy games (BardoGame, ShipItGame) take only `onClose` as their prop.
+// The registry's Pattern B render function feeds it from WindowProps.onClose.
 interface LoomGameProps {
-  id: string;
   onClose: () => void;
 }
 
-export default function LOOMGame(_props: LoomGameProps) {
+export function LOOMGame(_props: LoomGameProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [booted, setBooted] = useState(false);
 
-  // Sized to the OS-window's content area. The window itself manages its own
-  // size; we fill 100% of it.
   return (
     <div className="relative h-full w-full overflow-hidden bg-black">
       <canvas
@@ -356,8 +366,8 @@ export default function LOOMGame(_props: LoomGameProps) {
 ```
 
 Notes:
-- We export *default* to match a `lazy(() => import(...))` import pattern.
-- The component's actual `WindowProps` shape from Task 0.1 may have more fields (`title`, `onSave`, etc.). Adjust `LoomGameProps` to match — but for Phase 0, we only need to receive props without crashing; we don't have to implement save/restore yet.
+- **Named export** `export function LOOMGame` matches the BardoGame / ShipItGame convention. The registry entry handles the `.then(m => ({ default: m.LOOMGame }))` wrapper.
+- Component takes only `onClose: () => void` — that's the prop shape Pattern B's render function supplies.
 - The `imageRendering: 'pixelated'` style ensures the canvas's eventual nearest-neighbor scaling looks crisp.
 
 - [ ] **Step 3: Type-check**
@@ -394,42 +404,37 @@ canvas. The actual game loop arrives in Phase 1."
 
 ---
 
-## Task 0.4: Add `LOOM.EXE` filesystem entry + unlock flag
+## Task 0.4: Add `loom.exe` filesystem entry + `loom_archive.dat` unlock setup
 
 **Files:**
-- Modify: `/Users/justinwest/Repos/l0b0tonline/store/slices/filesystem.ts` *(or whatever path Task 0.1 confirmed)*
-- Modify: `/Users/justinwest/Repos/l0b0tonline/store/slices/unlocks.ts` *(or wherever unlocks live)*
+- Modify: `/Users/justinwest/Repos/l0b0tonline/data/filesystem/nodes.ts` *(this is where the actual filesystem tree lives — NOT in `store/slices/`, per Task 0.1's correction)*
+- (Possibly) Modify: `/Users/justinwest/Repos/l0b0tonline/store/slices/unlocksSlice.ts` *(only if we need to pre-register `loom_archive.dat`; per Task 0.1, unlocks are a `string[]` array — files only get added when unlocked, no pre-registration needed)*
 
-- [ ] **Step 1: Add `LOOM.EXE` to the default filesystem**
+- [ ] **Step 1: Add `loom.exe` to the filesystem nodes**
 
-Open the filesystem slice file confirmed in Task 0.1. Find where existing executable files live in the default file tree (e.g. `SHIPIT.EXE`, `MEMORY.EXE`). Add an entry following the same exact shape:
+Open `/Users/justinwest/Repos/l0b0tonline/data/filesystem/nodes.ts`. Find existing EXE entries (e.g. `ship_it.exe`, `bardo.exe`) — match their exact shape and convention (lowercase filename + `type: 'EXE'`):
 
 ```typescript
-// Inside the existing files array / object:
-{
-  name: 'LOOM.EXE',
-  path: '/desktop/LOOM.EXE',     // adjust path-prefix per existing convention
-  type: 'executable',             // adjust per existing 'type' values
-  target: WindowType.GAME_LOOM,   // imports from types.ts
-  description: 'L00M corporate onboarding simulator',
-  size: 1024,                     // optional — match what existing entries do
-  unlockRequired: false,          // visible by default; not gated
+"loom.exe": {
+  name: "loom.exe",
+  type: 'EXE',
+  target: WindowType.GAME_LOOM,
+  content: "INITIALIZING LOOM PROTOCOL..."
 },
 ```
 
-Match the *exact shape* of existing entries — types, optional fields, conventions.
+Insert it in the same parent directory/object where existing executables live (likely the desktop or root node — match the existing pattern for ship_it.exe / bardo.exe).
 
-- [ ] **Step 2: Add `loom_archive.dat` to unlocks**
+- [ ] **Step 2: Verify unlocks slice — no changes needed for Phase 0**
 
-Find the unlocks slice. Add a new flag for the post-game unlock:
+Per Task 0.1: `unlockedFiles` is a `string[]` array, and files are only added when unlocked (no pre-registration). The `loom_archive.dat` file gets pushed onto `unlockedFiles[]` after the C-reveal in Phase 5 — **no Phase 0 work required here**. Skip to Step 3.
 
-```typescript
-{
-  // …existing unlocks…
-  loom_archive: false,
-}
+If you want to verify, peek at `store/slices/unlocksSlice.ts`:
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+head -40 store/slices/unlocksSlice.ts
 ```
-or however the slice represents flags. (If unlocks are tracked as a Set, add `'loom_archive'`.)
+Confirm the slice exposes `unlockFile(filename: string): boolean` and `isFileUnlocked(filename: string): boolean`. We use these in Phase 5; no edits required now.
 
 - [ ] **Step 3: Type-check**
 
