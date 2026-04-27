@@ -1,1469 +1,2276 @@
-# LOOM-DOOM Phase 0 + Phase 1 Implementation Plan
+# LOOM Phase 0 + Phase 1 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the build harness for the LOOM-DOOM mod (Phase 0) and ship a tracer-bullet end-to-end vertical (Phase 1) — one map, two weapons (Branded Pen + Slot 0 Neural Pulse), one enemy (Intern), the J0IN 0S terminal HUD shell, and a working `LD_CycleManager` singleton.
+**Goal:** Integrate **LOOM** (a DOOM-style raycaster FPS) as a new app inside [l0b0tonline](../../../../../l0b0tonline)'s J0IN 0S simulator. Phase 0 stands up the J0IN 0S app shell (clickable icon → window spawns → black canvas). Phase 1 ships a tracer-bullet vertical: one map, two weapons, one enemy, J0IN 0S terminal HUD overlay, all running on a custom WebGL2 raycaster.
 
-**Architecture:** GZDoom 4.x mod packaged as `loom-doom.pk3`. ZScript drives all custom mechanics. Maps authored in SLADE 3, packed as WADs inside the PK3 under `maps/`. Neural Pulse is an Inventory item + `StaticEventHandler` (not a `Weapon`) bound to a custom KEYCONF keybind. Custom HUD inherits `BaseStatusBar` and is registered via MAPINFO. Cycle state lives in a `StaticEventHandler` singleton that survives map transitions.
+**Architecture:** Custom TypeScript raycaster rendering at internal 320×240 via WebGL2, scaled with nearest-neighbor to a J0IN 0S window. Game state in a Zustand slice. HUD as a React component overlaid on the canvas. Code lives in `l0b0tonline/components/loom/` and `l0b0tonline/components/LOOMGame.tsx`.
 
-**Tech Stack:** GZDoom 4.14+, ZScript v4.10, SLADE 3, bash, macOS host (player provides their own `doom2.wad`).
+**Tech Stack:** TypeScript 5.8, React 19.2, Vite 6.2, Tailwind v4, Zustand 5, Web Audio API, WebGL 2 (new dep), Vitest, Playwright. **All except WebGL2 are already in l0b0tonline's package.json.**
 
-**Pre-existing state:**
-- Repo at `/Users/justinwest/Repos/LOOM-DOOM` is a git worktree on branch `claude/awesome-sutherland-aad854`
-- `linuxdoom-1.10/`, `ipx/`, `sersrc/`, `sndserv/`, `LICENSE.TXT`, `README.TXT` — preserved 1997 source. **Do not modify these.**
-- `.gitignore` exists with `dist/`, `.superpowers/`, `.DS_Store`, etc.
-- `docs/superpowers/specs/2026-04-27-loom-doom-design.md` — the design spec (the source of truth this plan implements)
+**Pre-existing state (read-only context):**
+- This LOOM-DOOM repo is a worktree on `claude/awesome-sutherland-aad854`
+- Spec lives at `docs/superpowers/specs/2026-04-27-loom-doom-design.md` (this repo)
+- Implementation work happens in **`/Users/justinwest/Repos/l0b0tonline/`** (sibling repo, **not** in this LOOM-DOOM worktree)
+- l0b0tonline already has: app registry, window manager, Zustand store, Web Audio service, file system, unlocks system. We extend, we don't rebuild.
+
+**Where commands run:** Each task notes its working directory. Most tasks operate in l0b0tonline. The plan and commit messages mention LOOM-DOOM (because the plan is here, by convention). Don't get them mixed.
 
 ---
 
-## File structure (post-Phase-1)
+## File structure (post-Phase-1, in l0b0tonline)
 
 ```
-LOOM-DOOM/
-├── .gitignore                                 (already exists)
-├── README.md                                  (NEW — Task 0.2)
-├── CLAUDE.md                                  (NEW — Task 0.2)
-├── linuxdoom-1.10/, ipx/, sersrc/, sndserv/   (preserved, untouched)
-├── LICENSE.TXT, README.TXT                    (preserved, untouched)
-├── docs/superpowers/                          (already exists)
-│   ├── specs/2026-04-27-loom-doom-design.md   (already exists)
-│   └── plans/2026-04-27-loom-doom-phase-0-1.md (this file)
-├── src/
-│   ├── GAMEINFO.txt                           (NEW — Task 0.4)
-│   ├── MAPINFO.txt                            (NEW — Task 0.4 + extended in 1.2, 1.3, 1.7)
-│   ├── KEYCONF.txt                            (NEW — Task 1.6)
-│   ├── zscript.txt                            (NEW — Task 1.1, root ZScript include)
-│   ├── zscript/
-│   │   ├── cycle_manager.zs                   (NEW — Task 1.2)
-│   │   ├── ld_player.zs                       (NEW — Task 1.3)
-│   │   ├── branded_pen.zs                     (NEW — Task 1.4)
-│   │   ├── intern.zs                          (NEW — Task 1.5)
-│   │   ├── neural_pulse.zs                    (NEW — Task 1.6)
-│   │   └── ld_statusbar.zs                    (NEW — Task 1.7)
-│   ├── sprites/
-│   │   ├── PENGA0.png                         (NEW — Task 1.4, placeholder)
-│   │   ├── PENGB0.png                         (NEW — Task 1.4, placeholder)
-│   │   ├── INTRA0.png ... INTRG0.png          (NEW — Task 1.5, placeholders, single-rotation)
-│   │   └── NPLSA0.png                         (NEW — Task 1.6, placeholder)
-│   └── maps/
-│       └── CYC1_TEST.wad                      (NEW — Task 0.3, authored in SLADE)
-├── tools/
-│   ├── build.sh                               (NEW — Task 0.5)
-│   ├── play.sh                                (NEW — Task 0.6)
-│   └── validate.sh                            (NEW — Task 0.5, scaffolded only — full impl in later phases)
-└── dist/                                      (gitignored, populated by build.sh)
-    └── loom-doom.pk3                          (build output)
+l0b0tonline/
+├── types.ts                                            (modify — add GAME_LOOM enum)
+├── components/
+│   ├── LOOMGame.tsx                                    (NEW — top-level game component, lazy-loaded)
+│   └── loom/                                           (NEW — all LOOM-specific code under here)
+│       ├── engine/
+│       │   ├── raycaster.ts                            (NEW — Phase 1)
+│       │   ├── renderer.ts                             (NEW — Phase 1, WebGL2)
+│       │   ├── gameLoop.ts                             (NEW — Phase 1)
+│       │   ├── mapLoader.ts                            (NEW — Phase 1)
+│       │   ├── collision.ts                            (NEW — Phase 1)
+│       │   ├── input.ts                                (NEW — Phase 1, keyboard + pointer-lock)
+│       │   └── audioController.ts                      (NEW — Phase 1, wraps soundService)
+│       ├── entities/
+│       │   ├── player.ts                               (NEW — Phase 1)
+│       │   ├── weapons/
+│       │   │   ├── IWeapon.ts                          (NEW — Phase 1, interface)
+│       │   │   ├── brandedPen.ts                       (NEW — Phase 1)
+│       │   │   └── neuralPulse.ts                      (NEW — Phase 1)
+│       │   └── enemies/
+│       │       └── intern.ts                           (NEW — Phase 1)
+│       ├── hud/
+│       │   ├── LoomHud.tsx                             (NEW — Phase 1, React overlay)
+│       │   └── BootSequence.tsx                        (NEW — Phase 0, J0IN 0S boot animation)
+│       ├── store/
+│       │   └── cycleStore.ts                           (NEW — Phase 1, Zustand slice)
+│       └── types.ts                                    (NEW — LOOM-internal types)
+├── features/windows/registry.tsx                       (modify — register GAME_LOOM)
+├── store/slices/filesystem.ts                          (modify — add LOOM.EXE)
+├── store/slices/unlocks.ts                             (modify — add loom_archive.dat) [path TBD in Task 0.1]
+├── data/content/loomLogs.ts                            (modify — add L-907 entry; deferred to Phase 5)
+└── public/data/loom/                                   (NEW — game asset directory)
+    ├── maps/
+    │   └── cyc1_test.json                              (NEW — Phase 1)
+    ├── sprites/
+    │   ├── intern_walk_a.png                           (NEW — Phase 1, placeholder)
+    │   ├── intern_walk_b.png                           (NEW — Phase 1)
+    │   ├── intern_attack.png                           (NEW — Phase 1)
+    │   ├── intern_death_a.png                          (NEW — Phase 1)
+    │   ├── intern_death_b.png                          (NEW — Phase 1)
+    │   ├── pen_idle.png                                (NEW — Phase 1, placeholder weapon view)
+    │   ├── pen_fire.png                                (NEW — Phase 1)
+    │   └── neural_pulse_proj.png                       (NEW — Phase 1, placeholder)
+    └── textures/
+        └── wall_lobby.png                              (NEW — Phase 1, placeholder)
 ```
 
 ---
 
-# Phase 0 — Build harness
+# Phase 0 — Integrate LOOM into J0IN 0S
 
-**Phase 0 Definition of Done:** running `./tools/play.sh` opens GZDoom into our empty `CYC1_TEST` map with no console errors. The full pipeline (src → build.sh → dist/loom-doom.pk3 → GZDoom) works end-to-end.
+**Phase 0 Definition of Done:** A user opens l0b0tonline in their browser, boots J0IN 0S, locates the **L00M.EXE** file (via terminal command or desktop shortcut — whichever the existing pattern dictates), opens it, and a J0IN 0S window spawns containing a "LOOM TECHNOLOGIES — UNIT BOOTLOADER" boot sequence followed by a black canvas. No browser-console errors.
 
 ---
 
-## Task 0.1: Verify dev toolchain
+## Task 0.1: Discover l0b0tonline structure + verify dev environment
 
 **Files:**
-- Read-only — no files created in this task
+- Read-only inventory: confirm scout report's findings against actual l0b0tonline state
+- No commits in this task
 
-- [ ] **Step 1: Verify GZDoom is installed (or install it)**
+- [ ] **Step 1: Verify l0b0tonline repo + branch**
 
-Run:
+Run from `/Users/justinwest/Repos/l0b0tonline`:
 ```bash
-ls /Applications/GZDoom.app/Contents/MacOS/gzdoom 2>&1
-```
-Expected: path printed. If "No such file":
-```bash
-brew install --cask gzdoom
-```
-Re-verify: the binary should now exist.
-
-- [ ] **Step 2: Confirm GZDoom version**
-
-Run:
-```bash
-/Applications/GZDoom.app/Contents/MacOS/gzdoom -version 2>&1 | head -5
-```
-Expected: a version line like `GZDoom v4.14.x` or similar. **Note the version** — we'll pin this in `zscript.txt` Step 1 of Task 1.1.
-
-- [ ] **Step 3: Verify SLADE is installed (or install it)**
-
-Run:
-```bash
-ls /Applications/SLADE.app 2>&1
-```
-Expected: path printed. If "No such file":
-```bash
-brew install --cask slade
-```
-If the cask doesn't exist on this Homebrew, fall back to: download the macOS build from https://slade.mancubus.net/ and install the .app to `/Applications/`.
-
-- [ ] **Step 4: Verify the player has a copy of doom2.wad somewhere on disk**
-
-Run:
-```bash
-find ~/Library/Application\ Support ~/Documents ~/Desktop /Applications -iname "doom2.wad" 2>/dev/null | head -5
-```
-Expected: at least one path printed. If not, the player must supply their own copy. **Save the absolute path** — `play.sh` will reference it.
-
-If no doom2.wad found, ask the user to point us at one before continuing. **Do not proceed without a valid IWAD path.**
-
-- [ ] **Step 5: Verify git worktree state**
-
-Run:
-```bash
+cd /Users/justinwest/Repos/l0b0tonline
 git status && git branch --show-current
 ```
-Expected: clean working tree, current branch `claude/awesome-sutherland-aad854`.
+Expected: clean working tree (or note any in-progress work). **Note the current branch name.** If on `main` / `master`, create a feature branch:
+```bash
+git checkout -b loom-game
+```
+
+- [ ] **Step 2: Verify dependencies installed and dev server works**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npm install 2>&1 | tail -10
+```
+Expected: clean install, no errors.
+
+```bash
+npm run dev 2>&1 | head -30 &
+DEV_PID=$!
+sleep 6
+echo "--- check process ---"
+ps -p $DEV_PID > /dev/null && echo "dev server running"
+kill $DEV_PID 2>/dev/null
+```
+Expected: Vite dev server starts. Note the port it bound to (commonly `5173`, `5174`, or `3000`).
+
+- [ ] **Step 3: Read & confirm key integration files**
+
+Read each of the following and **report the actual line ranges that match the scout's findings**:
+
+```bash
+cat /Users/justinwest/Repos/l0b0tonline/types.ts | head -80
+```
+Expected: a `WindowType` enum or const-object. **Note the exact path/syntax** — is it `enum WindowType { ... }` or `const WindowType = { ... } as const`? Are entries SCREAMING_CASE or camelCase? Note the existing entries (e.g. `GAME_MEMORY`, `GAME_SHIPIT`, etc.).
+
+```bash
+sed -n '120,260p' /Users/justinwest/Repos/l0b0tonline/features/windows/registry.tsx
+```
+Expected: a `WINDOW_REGISTRY` object/Record with entries shaped like `{ lazy: () => import(...), category: 'game', icon: <...>, ... }`. **Note the exact entry shape** for an existing game (e.g. `GAME_MEMORY`).
+
+```bash
+sed -n '1,50p' /Users/justinwest/Repos/l0b0tonline/components/WindowManager.tsx
+```
+Expected: a `WindowProps` interface near top of file. **Note its exact shape** — what props does our LOOMGame component need to accept (`id`, `type`, `data`, `title`, `onClose`, `onSave`, etc.)?
+
+```bash
+ls /Users/justinwest/Repos/l0b0tonline/store/slices/
+```
+Expected: filesystem slice + others. Find the slice that handles **filesystem entries** and the one that handles **unlocks** — note their actual filenames.
+
+```bash
+cat /Users/justinwest/Repos/l0b0tonline/data/content/loomLogs.ts
+```
+Expected: existing LOOM_LOGS array with L-901..L-906 entries. **Note the entry shape** (`id`, `time`, `subject`, `status`, `content`).
+
+```bash
+cat /Users/justinwest/Repos/l0b0tonline/services/soundService.ts | head -100
+```
+Expected: existing soundService. **Note its exported API** — what methods can LOOM call to play sounds?
+
+```bash
+ls /Users/justinwest/Repos/l0b0tonline/components/ | grep -i game
+ls /Users/justinwest/Repos/l0b0tonline/features/windows/types/
+```
+Expected: existing game components. Confirm ShipIt and Bardo live at the top-level `components/` path, mini-games at `features/windows/types/`.
+
+```bash
+cat /Users/justinwest/Repos/l0b0tonline/package.json | head -50
+```
+Expected: TypeScript, React, Vite, Zustand, Tailwind, Vitest, Playwright. Note the exact versions for our spec.
+
+- [ ] **Step 4: Open J0IN 0S in a browser and locate the LOOM-icon insertion point**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev &
+DEV_PID=$!
+sleep 5
+open "http://localhost:5173"
+```
+*(Adjust port if Step 2 reported a different one.)*
+
+In the browser:
+- Boot J0IN 0S to the desktop
+- Find an existing game like ShipIt — note how it appears (icon on desktop? terminal command? both?)
+- Note the exact mechanism we'll plug into for LOOM
+
+Then kill the dev server:
+```bash
+kill $DEV_PID 2>/dev/null
+```
+
+- [ ] **Step 5: Report findings**
+
+Status: DONE. Provide a summary report with:
+- Current branch in l0b0tonline
+- Vite dev port
+- Exact `WindowType` declaration syntax + sample entries
+- Exact `WINDOW_REGISTRY` entry shape (a literal example for `GAME_MEMORY` or similar)
+- Exact `WindowProps` interface shape
+- Path of filesystem slice and unlocks slice
+- Path of soundService and its exported API surface
+- Path where heavy games live (`components/SomethingGame.tsx`)
+- How games appear in the UI (icon? terminal? both?)
+- Anything in scout report that turned out to be different from reality
+
+This task creates no files; the deliverable is the corrected map for Tasks 0.2–0.4.
 
 ---
 
-## Task 0.2: Create directory skeleton + project README + CLAUDE.md
+## Task 0.2: Add `WindowType.GAME_LOOM` and register in `WINDOW_REGISTRY`
 
 **Files:**
-- Create: `src/`, `src/zscript/`, `src/sprites/`, `src/maps/`, `tools/`
-- Create: `README.md`
-- Create: `CLAUDE.md`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/types.ts`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/features/windows/registry.tsx`
 
-- [ ] **Step 1: Create the directory tree**
+- [ ] **Step 1: Add `GAME_LOOM` to `WindowType`**
 
-Run:
+Open `/Users/justinwest/Repos/l0b0tonline/types.ts` and find the `WindowType` declaration (path/line confirmed in Task 0.1).
+
+If it's a TypeScript enum:
+```typescript
+export enum WindowType {
+  // …existing entries…
+  GAME_LOOM = 'GAME_LOOM',
+}
+```
+
+If it's a const-object pattern (the alternate Task 0.1 might find):
+```typescript
+export const WindowType = {
+  // …existing entries…
+  GAME_LOOM: 'GAME_LOOM',
+} as const;
+```
+
+**Match the existing convention exactly** — don't change style. Add `GAME_LOOM` next to other game entries (alphabetically or grouped, whichever the file does).
+
+- [ ] **Step 2: Register `GAME_LOOM` in `WINDOW_REGISTRY`**
+
+Open `/Users/justinwest/Repos/l0b0tonline/features/windows/registry.tsx` and find the `WINDOW_REGISTRY` declaration. Find an existing game entry (e.g. `GAME_MEMORY`) — copy its shape exactly, substituting LOOM-specific values.
+
+Add this entry to `WINDOW_REGISTRY` (adjust property names to match what Task 0.1 confirmed):
+```typescript
+[WindowType.GAME_LOOM]: {
+  lazy: () => import('../../components/LOOMGame'),
+  category: 'game' as const,
+  icon: <span className="font-mono text-sm">L00M</span>,  // placeholder; better icon later
+  unlockFile: 'loom_archive.dat',
+  defaultSize: { width: 800, height: 600 },               // adjust if Task 0.1 found a different prop name
+  title: 'L00M.EXE',
+},
+```
+
+Make sure the import path from `features/windows/registry.tsx` to `components/LOOMGame.tsx` is correct — most likely `'../../components/LOOMGame'` from the registry file's location, but **verify against existing entries** that import from `components/`.
+
+- [ ] **Step 3: Type-check**
+
 ```bash
-mkdir -p src/zscript src/sprites src/maps tools
-ls -la src tools
+cd /Users/justinwest/Repos/l0b0tonline
+npx tsc --noEmit 2>&1 | head -20
 ```
-Expected: both directories exist; src/ has zscript, sprites, maps subdirs.
+Expected: no errors related to our changes. If TS complains about the missing `LOOMGame` component — that's expected (we create it in Task 0.3). The lazy import is statically typed but only resolved at runtime.
 
-- [ ] **Step 2: Write project-level README.md**
-
-Create `README.md` with this content:
-```markdown
-# LOOM-DOOM
-
-A thematic GZDoom total conversion of DOOM, reskinned with the satirical
-AI-rock-band universe of l0b0t and the corporate-dystopia setting of
-LOOM Inc. The original 1997 id Software Linux source release sits in
-`linuxdoom-1.10/` as preserved lineage; the actual mod targets GZDoom and
-ships as `loom-doom.pk3`.
-
-## Requirements
-
-- GZDoom 4.14+ (`brew install --cask gzdoom`)
-- A copy of `doom2.wad` you legally own (we don't redistribute it)
-- SLADE 3 if you want to edit maps locally (`brew install --cask slade`)
-- macOS / Linux / Windows (build scripts assume bash)
-
-## Build
-
-```bash
-./tools/build.sh
-./tools/play.sh
-```
-
-`build.sh` zips `src/` into `dist/loom-doom.pk3`. `play.sh` launches
-GZDoom with the PK3 against your local `doom2.wad`.
-
-## Design
-
-See [docs/superpowers/specs/2026-04-27-loom-doom-design.md](docs/superpowers/specs/2026-04-27-loom-doom-design.md).
-
-## License
-
-The 1997 id Software source under `linuxdoom-1.10/`, `ipx/`, `sersrc/`,
-`sndserv/` is GPL — see `LICENSE.TXT`. Original LOOM-DOOM mod assets and
-code are GPL-3.0 (matching the 1997 release lineage).
-```
-
-- [ ] **Step 3: Write CLAUDE.md**
-
-Create `CLAUDE.md` with this content:
-```markdown
-# CLAUDE.md
-
-Instructions for AI agents working in this repo.
-
-## Project context
-
-LOOM-DOOM is a GZDoom total conversion. The 1997 DOOM source under
-`linuxdoom-1.10/` (and the IPX/serial/sound-server subdirs) is preserved
-lineage — **never modify it**. All actual mod code lives in `src/`.
-
-## Source of truth
-
-The design spec at `docs/superpowers/specs/2026-04-27-loom-doom-design.md`
-is the canonical reference for what LOOM-DOOM is. When in doubt, read
-that. Implementation plans live in `docs/superpowers/plans/`.
-
-## Conventions
-
-- ZScript files: lowercase_snake_case.zs under `src/zscript/`
-- Sprite filenames: 4-character base + frame letter + rotation digit
-  (e.g. `PENGA0.png`, `INTRA0.png`). Use rotation `0` for non-rotating
-  single-frame sprites.
-- Maps live as `.wad` files under `src/maps/`. Author with SLADE 3 or
-  Ultimate Doom Builder.
-- Commit per task. Frequent commits. Don't batch unrelated changes.
-
-## Build & run
-
-- `./tools/build.sh` produces `dist/loom-doom.pk3`
-- `./tools/play.sh` launches GZDoom with the PK3 (optional arg: map name to warp to)
-
-## Out of scope
-
-- Modifying the 1997 source lineage
-- Custom C engine patches (everything lives in ZScript / DECORATE / UDMF)
-- Redistributing doom2.wad
-```
+If the lazy import fails type-checking, temporarily comment out the registry entry and we'll re-enable it after Task 0.3.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add README.md CLAUDE.md
-git commit -m "Add project README and CLAUDE.md"
+cd /Users/justinwest/Repos/l0b0tonline
+git add types.ts features/windows/registry.tsx
+git commit -m "Add WindowType.GAME_LOOM and register lazy LOOMGame component
+
+Reserves the registry slot for the LOOM raycaster FPS, which will be
+implemented as a J0IN 0S app starting in the next task."
 ```
 
 ---
 
-## Task 0.3: Author placeholder UDMF map (CYC1_TEST.wad) in SLADE
+## Task 0.3: Create `LOOMGame.tsx` skeleton with boot sequence + black canvas
 
 **Files:**
-- Create: `src/maps/CYC1_TEST.wad`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/LOOMGame.tsx`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/hud/BootSequence.tsx`
 
-This task is GUI-driven (SLADE is a desktop app). If running headless / via subagent, request the user perform this step themselves and confirm before continuing.
+- [ ] **Step 1: Create the BootSequence React component**
 
-- [ ] **Step 1: Open SLADE and create a new empty WAD**
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/hud/BootSequence.tsx`:
+```tsx
+import { useEffect, useState } from 'react';
 
-Launch `/Applications/SLADE.app`. Menu: `File → New → WAD Archive`.
+const BOOT_LINES = [
+  'LOOM TECHNOLOGIES — UNIT BOOTLOADER',
+  '',
+  'BIOS_CHECK ............................... OK',
+  'MOUNTING_FS .............................. OK',
+  'LOADING_KERNEL ........................... OK',
+  'ESTABLISHING_SECURE_CONNECTION ...........',
+  'ACCESS_GRANTED',
+  '',
+  '> spawn unit#88-E in CYC1_LOBBY',
+];
 
-- [ ] **Step 2: Add a new UDMF map**
+const LINE_DELAY_MS = 280;
 
-Menu: `Archive → New → Map`. In the dialog:
-- Map name: `CYC1_TEST`
-- Format: `UDMF`
-- Game configuration: `Doom 2 (UDMF)`
-- Click `Create Map`
-
-This opens SLADE's built-in map editor.
-
-- [ ] **Step 3: Draw a 256×256 room**
-
-In the map editor:
-- Press `D` for Drawing mode
-- Click 4 corners to form a square sector (suggest coordinates `(-128,-128)`, `(128,-128)`, `(128,128)`, `(-128,128)`)
-- Press `Enter` to close the sector
-
-The room is created with default floor/ceiling textures (likely STARTAN3 walls, FLOOR4_8 floor).
-
-- [ ] **Step 4: Place player 1 start and 3 placeholder things (will become Interns later)**
-
-Press `T` for Things mode:
-- Place a Player 1 Start (Thing type 1) near the center, facing east (angle 0)
-- Place 3 generic monsters (any default monster — they'll be replaced via DECORATE-style swap later) at three corners
-
-Save the map (`Ctrl+S` / `Cmd+S`).
-
-- [ ] **Step 5: Save the WAD**
-
-Menu: `File → Save As`. Save as `src/maps/CYC1_TEST.wad` in the project repo.
-
-Verify on disk:
-```bash
-ls -la src/maps/CYC1_TEST.wad
-```
-Expected: file exists, size >100 bytes.
-
-- [ ] **Step 6: Confirm the WAD parses**
-
-Reopen it in SLADE: `File → Open` → `src/maps/CYC1_TEST.wad`. The map should load and display the room. If errors are shown, return to Step 3.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/maps/CYC1_TEST.wad
-git commit -m "Add CYC1_TEST.wad placeholder map for tracer bullet"
-```
-
----
-
-## Task 0.4: Write GAMEINFO and MAPINFO
-
-**Files:**
-- Create: `src/GAMEINFO.txt`
-- Create: `src/MAPINFO.txt`
-
-- [ ] **Step 1: Write GAMEINFO.txt**
-
-GZDoom looks for this lump in the PK3 root and reads it before everything else. It tells GZDoom which IWAD this mod targets.
-
-Create `src/GAMEINFO.txt`:
-```
-IWAD = "doom2.wad"
-LOAD = ""
-NOSPRITERENAME = "true"
-STARTUPTITLE = "LOOM-DOOM"
-```
-
-- [ ] **Step 2: Write MAPINFO.txt**
-
-Create `src/MAPINFO.txt`:
-```
-gameinfo
-{
-    titlepage = "TITLEPIC"
-    creditpage = "CREDIT"
-    intermissionmusic = "$MUSIC_DM2INT"
+interface BootSequenceProps {
+  onComplete: () => void;
 }
 
-map CYC1_TEST "Tracer Bullet (CYC1_TEST)"
-{
-    next = "CYC1_TEST"
-    sky1 = "SKY1"
-    music = "$MUSIC_RUNNIN"
-    par = 60
-}
+export function BootSequence({ onComplete }: BootSequenceProps) {
+  const [visibleLines, setVisibleLines] = useState(0);
 
-clearepisodes
-episode CYC1_TEST
-{
-    name = "Cycle 1 - Tracer Bullet"
-    key = "1"
+  useEffect(() => {
+    if (visibleLines >= BOOT_LINES.length) {
+      const t = setTimeout(onComplete, 600);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => setVisibleLines((n) => n + 1), LINE_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [visibleLines, onComplete]);
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-black font-mono text-sm leading-relaxed text-green-400">
+      <div className="flex flex-col items-start">
+        {BOOT_LINES.slice(0, visibleLines).map((line, i) => (
+          <div key={i}>{line || ' '}</div>
+        ))}
+        {visibleLines < BOOT_LINES.length && (
+          <div className="ml-1 inline-block h-4 w-2 animate-pulse bg-green-400" />
+        )}
+      </div>
+    </div>
+  );
 }
 ```
 
-This defines a single map (`CYC1_TEST`), wires it into a one-episode game, and gives it placeholder stock DOOM textures (TITLEPIC, SKY1) and music. We'll replace these in later phases.
+- [ ] **Step 2: Create the LOOMGame top-level component**
 
-- [ ] **Step 3: Verify file contents**
+Create `/Users/justinwest/Repos/l0b0tonline/components/LOOMGame.tsx`:
+```tsx
+import { useEffect, useRef, useState } from 'react';
+import { BootSequence } from './loom/hud/BootSequence';
 
-Run:
-```bash
-cat src/GAMEINFO.txt src/MAPINFO.txt
-```
-Expected: both files print, no syntax errors visible. (Real validation comes in Task 0.6 when we launch GZDoom.)
+// WindowProps shape — adjust to match l0b0tonline's actual WindowProps interface
+// confirmed in Task 0.1. The minimal props we need for Phase 0 are id and onClose.
+interface LoomGameProps {
+  id: string;
+  onClose: () => void;
+}
 
-- [ ] **Step 4: Commit**
+export default function LOOMGame(_props: LoomGameProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [booted, setBooted] = useState(false);
 
-```bash
-git add src/GAMEINFO.txt src/MAPINFO.txt
-git commit -m "Add GAMEINFO + MAPINFO with single tracer-bullet map definition"
-```
-
----
-
-## Task 0.5: Write tools/build.sh and scaffold validate.sh
-
-**Files:**
-- Create: `tools/build.sh`
-- Create: `tools/validate.sh` (scaffold only)
-
-- [ ] **Step 1: Write tools/build.sh**
-
-Create `tools/build.sh`:
-```bash
-#!/usr/bin/env bash
-# build.sh — package src/ into dist/loom-doom.pk3
-#
-# A PK3 is just a ZIP with a different extension. GZDoom reads it
-# transparently. We zip from inside src/ so the archive root contains
-# GAMEINFO.txt etc. directly (not nested under "src/").
-
-set -euo pipefail
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_DIR="$REPO_ROOT/src"
-DIST_DIR="$REPO_ROOT/dist"
-PK3_PATH="$DIST_DIR/loom-doom.pk3"
-
-if [[ ! -d "$SRC_DIR" ]]; then
-    echo "FATAL: $SRC_DIR does not exist" >&2
-    exit 1
-fi
-
-mkdir -p "$DIST_DIR"
-rm -f "$PK3_PATH"
-
-cd "$SRC_DIR"
-# Exclude macOS junk and editor backup files. -r recurses; -X strips extra attrs.
-zip -r -X -q "$PK3_PATH" . \
-    -x ".DS_Store" "*/.DS_Store" "*~" "*.swp"
-
-echo "Built: $PK3_PATH ($(du -h "$PK3_PATH" | cut -f1))"
+  // Sized to the OS-window's content area. The window itself manages its own
+  // size; we fill 100% of it.
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-black">
+      <canvas
+        ref={canvasRef}
+        className="h-full w-full"
+        style={{ imageRendering: 'pixelated' }}
+      />
+      {!booted && <BootSequence onComplete={() => setBooted(true)} />}
+    </div>
+  );
+}
 ```
 
-- [ ] **Step 2: Make build.sh executable**
+Notes:
+- We export *default* to match a `lazy(() => import(...))` import pattern.
+- The component's actual `WindowProps` shape from Task 0.1 may have more fields (`title`, `onSave`, etc.). Adjust `LoomGameProps` to match — but for Phase 0, we only need to receive props without crashing; we don't have to implement save/restore yet.
+- The `imageRendering: 'pixelated'` style ensures the canvas's eventual nearest-neighbor scaling looks crisp.
+
+- [ ] **Step 3: Type-check**
 
 ```bash
-chmod +x tools/build.sh
-ls -l tools/build.sh
+cd /Users/justinwest/Repos/l0b0tonline
+npx tsc --noEmit 2>&1 | head -20
 ```
-Expected: permissions show `-rwxr-xr-x` (or similar with execute bit).
+Expected: no errors. If the registry entry from Task 0.2 was commented out, re-enable it now and verify the lazy-import resolves cleanly.
 
-- [ ] **Step 3: Run build.sh and verify output**
+- [ ] **Step 4: Verify the component imports resolve**
 
 ```bash
-./tools/build.sh
-```
-Expected stdout: `Built: /path/to/dist/loom-doom.pk3 (XK)`.
-
-Verify:
-```bash
-ls -la dist/
-unzip -l dist/loom-doom.pk3 | head -20
-```
-Expected: `loom-doom.pk3` exists in `dist/`. The archive listing shows `GAMEINFO.txt`, `MAPINFO.txt`, `maps/CYC1_TEST.wad`, and the empty `zscript/` and `sprites/` directories (no zscript.txt yet).
-
-- [ ] **Step 4: Write tools/validate.sh scaffold**
-
-Create `tools/validate.sh`:
-```bash
-#!/usr/bin/env bash
-# validate.sh — lint sprite filenames + asset reference checks
-#
-# Phase 0+1 scaffold: this script is intentionally minimal. It will be
-# extended in later phases as we accumulate sprite-naming conventions
-# and ZScript class references that need cross-checking.
-
-set -euo pipefail
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_DIR="$REPO_ROOT/src"
-
-errors=0
-
-# Check 1: sprite filenames follow 4-char + frame + rotation pattern (when sprites exist)
-if compgen -G "$SRC_DIR/sprites/*.png" > /dev/null; then
-    while IFS= read -r f; do
-        bn="$(basename "$f" .png)"
-        # Match XXXXY[0-8] (8 chars total: 4 base + 1 frame letter + 1 rotation digit) OR
-        #       XXXXYZW[0-8] (mirrored frames) — for now, just check 6-char baseline
-        if [[ ! "$bn" =~ ^[A-Z0-9]{4}[A-Z][0-8]$ ]] && [[ ! "$bn" =~ ^[A-Z0-9]{4}[A-Z][0-8][A-Z][0-8]$ ]]; then
-            echo "ERROR: sprite filename does not match DOOM naming convention: $bn" >&2
-            errors=$((errors + 1))
-        fi
-    done < <(find "$SRC_DIR/sprites" -name "*.png" -type f)
-fi
-
-if (( errors > 0 )); then
-    echo "Validation failed: $errors error(s)" >&2
-    exit 1
-fi
-
-echo "Validation passed."
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev &
+DEV_PID=$!
+sleep 5
 ```
 
-- [ ] **Step 5: Make validate.sh executable and run it**
+Open http://localhost:5173 in a browser, boot J0IN 0S, look for any browser-console errors. If `LOOMGame` fails to load, check the import path in `registry.tsx`.
 
-```bash
-chmod +x tools/validate.sh
-./tools/validate.sh
-```
-Expected: `Validation passed.` (no sprites yet, so nothing to validate).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add tools/build.sh tools/validate.sh
-git commit -m "Add build.sh (src/ -> dist/loom-doom.pk3) and validate.sh scaffold"
-```
-
----
-
-## Task 0.6: Write tools/play.sh and verify Phase 0 DoD
-
-**Files:**
-- Create: `tools/play.sh`
-
-- [ ] **Step 1: Write tools/play.sh**
-
-Create `tools/play.sh`:
-```bash
-#!/usr/bin/env bash
-# play.sh — launch GZDoom with our mod
-#
-# Usage:
-#   ./tools/play.sh                    # boot to title screen
-#   ./tools/play.sh CYC1_TEST          # warp directly to a map
-#
-# Requires:
-#   - GZDoom installed (default: /Applications/GZDoom.app)
-#   - doom2.wad at $LOOM_DOOM_IWAD or one of the fallback paths below
-#   - dist/loom-doom.pk3 (run ./tools/build.sh first if missing)
-
-set -euo pipefail
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PK3_PATH="$REPO_ROOT/dist/loom-doom.pk3"
-
-GZDOOM_BIN="${GZDOOM_BIN:-/Applications/GZDoom.app/Contents/MacOS/gzdoom}"
-
-# IWAD resolution: env var first, then check common locations
-IWAD="${LOOM_DOOM_IWAD:-}"
-if [[ -z "$IWAD" ]]; then
-    for candidate in \
-        "$HOME/doom2.wad" \
-        "$HOME/Documents/doom2.wad" \
-        "$HOME/Desktop/doom2.wad" \
-        "$HOME/Library/Application Support/gzdoom/doom2.wad" \
-        "$REPO_ROOT/doom2.wad"; do
-        if [[ -f "$candidate" ]]; then
-            IWAD="$candidate"
-            break
-        fi
-    done
-fi
-
-if [[ -z "$IWAD" || ! -f "$IWAD" ]]; then
-    echo "FATAL: doom2.wad not found." >&2
-    echo "Set LOOM_DOOM_IWAD to its path, e.g.:" >&2
-    echo "  export LOOM_DOOM_IWAD=/path/to/doom2.wad" >&2
-    exit 1
-fi
-
-if [[ ! -x "$GZDOOM_BIN" ]]; then
-    echo "FATAL: gzdoom binary not found at $GZDOOM_BIN" >&2
-    echo "Install: brew install --cask gzdoom" >&2
-    echo "Or set GZDOOM_BIN to override the path." >&2
-    exit 1
-fi
-
-if [[ ! -f "$PK3_PATH" ]]; then
-    echo "loom-doom.pk3 not built yet — running build.sh first…" >&2
-    "$REPO_ROOT/tools/build.sh"
-fi
-
-# Build the GZDoom command
-ARGS=(
-    -iwad "$IWAD"
-    -file "$PK3_PATH"
-    -nostartup
-)
-
-# If a map argument was passed, append a +map console command to warp directly
-if [[ $# -gt 0 ]]; then
-    MAP_NAME="$1"
-    ARGS+=(+map "$MAP_NAME")
-    echo "Launching with warp to map: $MAP_NAME"
-fi
-
-echo "Running: $GZDOOM_BIN ${ARGS[*]}"
-exec "$GZDOOM_BIN" "${ARGS[@]}"
-```
-
-- [ ] **Step 2: Make play.sh executable**
-
-```bash
-chmod +x tools/play.sh
-```
-
-- [ ] **Step 3: Run play.sh — expect GZDoom title screen**
-
-```bash
-./tools/play.sh
-```
-Expected: GZDoom window opens, shows the standard DOOM 2 title screen. No fatal errors in the console (the GZDoom log will print to terminal alongside).
-
-If it fails:
-- "doom2.wad not found": set `LOOM_DOOM_IWAD` env var to the actual path
-- "Bad MAPINFO" or similar: re-check `src/MAPINFO.txt` syntax (Task 0.4)
-- ZScript-related error: there shouldn't be any yet — we have no zscript.txt; if you see ZScript errors, examine the log
-
-Quit GZDoom (`Cmd+Q` or close the window).
-
-- [ ] **Step 4: Run play.sh with map warp arg — Phase 0 DoD**
-
-```bash
-./tools/play.sh CYC1_TEST
-```
-Expected: GZDoom launches and warps directly into the empty CYC1_TEST room. You can walk around the placeholder room. No errors.
-
-**This is the Phase 0 Definition of Done — the build pipeline works end-to-end.**
-
-Quit GZDoom.
+Kill the dev server: `kill $DEV_PID`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tools/play.sh
-git commit -m "Add play.sh (Phase 0 done — empty CYC1_TEST loads cleanly)"
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/LOOMGame.tsx components/loom/hud/BootSequence.tsx
+git commit -m "Add LOOMGame skeleton with J0IN 0S boot sequence
+
+Phase 0 placeholder. Window opens, boot text scrolls, ends on black
+canvas. The actual game loop arrives in Phase 1."
+```
+
+---
+
+## Task 0.4: Add `LOOM.EXE` filesystem entry + unlock flag
+
+**Files:**
+- Modify: `/Users/justinwest/Repos/l0b0tonline/store/slices/filesystem.ts` *(or whatever path Task 0.1 confirmed)*
+- Modify: `/Users/justinwest/Repos/l0b0tonline/store/slices/unlocks.ts` *(or wherever unlocks live)*
+
+- [ ] **Step 1: Add `LOOM.EXE` to the default filesystem**
+
+Open the filesystem slice file confirmed in Task 0.1. Find where existing executable files live in the default file tree (e.g. `SHIPIT.EXE`, `MEMORY.EXE`). Add an entry following the same exact shape:
+
+```typescript
+// Inside the existing files array / object:
+{
+  name: 'LOOM.EXE',
+  path: '/desktop/LOOM.EXE',     // adjust path-prefix per existing convention
+  type: 'executable',             // adjust per existing 'type' values
+  target: WindowType.GAME_LOOM,   // imports from types.ts
+  description: 'L00M corporate onboarding simulator',
+  size: 1024,                     // optional — match what existing entries do
+  unlockRequired: false,          // visible by default; not gated
+},
+```
+
+Match the *exact shape* of existing entries — types, optional fields, conventions.
+
+- [ ] **Step 2: Add `loom_archive.dat` to unlocks**
+
+Find the unlocks slice. Add a new flag for the post-game unlock:
+
+```typescript
+{
+  // …existing unlocks…
+  loom_archive: false,
+}
+```
+or however the slice represents flags. (If unlocks are tracked as a Set, add `'loom_archive'`.)
+
+- [ ] **Step 3: Type-check**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npx tsc --noEmit 2>&1 | head -20
+```
+Expected: no errors.
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+git add store/slices/
+git commit -m "Add LOOM.EXE filesystem entry and loom_archive unlock flag
+
+LOOM.EXE appears on the J0IN 0S filesystem from boot. Clicking/running
+it spawns the LOOM game window. The unlock flag will be set true after
+the C-reveal in Phase 5."
+```
+
+---
+
+## Task 0.5: Phase 0 DoD smoke test
+
+**Files:**
+- No code changes; this is a manual playtest gate
+
+- [ ] **Step 1: Boot l0b0tonline locally**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev
+```
+Open http://localhost:5173 in a browser.
+
+- [ ] **Step 2: Play through Phase 0 DoD**
+
+Walk through this checklist. Each must pass:
+
+| # | Behavior | Expected |
+|---|---|---|
+| 1 | l0b0tonline boots cleanly | no console errors during initial page load |
+| 2 | J0IN 0S desktop reachable | log in / boot through to the desktop screen |
+| 3 | LOOM.EXE visible | appears in filesystem (terminal `ls /desktop` or graphical view, depending on the J0IN 0S pattern) |
+| 4 | LOOM.EXE openable | running it (terminal command or click) spawns a window |
+| 5 | Window chrome correct | window title reads "L00M.EXE", close/drag/resize work normally |
+| 6 | Boot sequence plays | green-on-black "LOOM TECHNOLOGIES — UNIT BOOTLOADER" lines scroll in over ~3s |
+| 7 | Boot completes | all lines visible, then the boot-text disappears |
+| 8 | Black canvas remains | window contents settle to a black canvas (game loop comes Phase 1) |
+| 9 | Window closeable | close button kills the window cleanly, no console errors |
+| 10 | Re-openable | running LOOM.EXE again works the same way |
+
+If any fail, return to the relevant Task and fix.
+
+- [ ] **Step 3: Save Phase 0 playtest log**
+
+Create `/Users/justinwest/Repos/LOOM-DOOM/.claude/worktrees/awesome-sutherland-aad854/docs/playtests/2026-04-27-phase-0-dod.md`:
+```markdown
+# Phase 0 DoD — Playtest Log
+
+**Date:** 2026-04-27
+**Tester:** [your name / "agent" / "claude"]
+**l0b0tonline commit:** [paste current git short hash from l0b0tonline]
+**LOOM-DOOM plan commit:** [paste current git short hash from LOOM-DOOM]
+
+## Checklist
+
+| # | Behavior | Result |
+|---|---|---|
+| 1 | l0b0tonline boots cleanly | PASS / FAIL |
+| 2 | J0IN 0S desktop reachable | PASS / FAIL |
+| 3 | LOOM.EXE visible | PASS / FAIL |
+| 4 | LOOM.EXE openable | PASS / FAIL |
+| 5 | Window chrome correct | PASS / FAIL |
+| 6 | Boot sequence plays | PASS / FAIL |
+| 7 | Boot completes | PASS / FAIL |
+| 8 | Black canvas remains | PASS / FAIL |
+| 9 | Window closeable | PASS / FAIL |
+| 10 | Re-openable | PASS / FAIL |
+
+## Notes / known issues
+
+[Anything weird, edge cases, etc.]
+
+## Phase 0 Definition of Done
+
+[X] All 10 checklist items pass — Phase 0 complete.
+```
+
+Replace PASS / FAIL with actual results.
+
+- [ ] **Step 4: Commit playtest log**
+
+```bash
+cd /Users/justinwest/Repos/LOOM-DOOM/.claude/worktrees/awesome-sutherland-aad854
+mkdir -p docs/playtests
+git add docs/playtests/2026-04-27-phase-0-dod.md
+git commit -m "Add Phase 0 DoD playtest log"
 ```
 
 ---
 
 # Phase 1 — Tracer bullet
 
-**Phase 1 Definition of Done:** Player loads into `CYC1_TEST`, sees the J0IN 0S terminal HUD with cycle indicator, has Branded Pen + always-on Neural Pulse, can shoot 3 Interns, kill them all. Console shows `LD_CycleManager: registered, cycle=1, corruption=0` at startup. **All major subsystems are wired together.**
+**Phase 1 Definition of Done:** Player opens LOOM, walks around a single room with WASD + mouse-look, fires the Branded Pen, fires the Neural Pulse with F, kills 3 Interns. The J0IN 0S terminal HUD overlays the canvas showing health/ammo/cycle state. CycleStore reports `cycle=1, corruption=0` throughout. **Every major subsystem talks to every other.**
 
 ---
 
-## Task 1.1: ZSCRIPT root file + LANGUAGE stub
+## Task 1.1: Create `cycleStore` Zustand slice
 
 **Files:**
-- Create: `src/zscript.txt`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/store/cycleStore.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/store/cycleStore.test.ts`
 
-- [ ] **Step 1: Write zscript.txt root file**
+- [ ] **Step 1: Write the failing test**
 
-Create `src/zscript.txt`:
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/store/cycleStore.test.ts`:
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { useCycleStore } from './cycleStore';
+
+describe('cycleStore', () => {
+  beforeEach(() => {
+    useCycleStore.getState().reset();
+  });
+
+  it('initializes with cycle=1, corruption=0, identityRevealed=false', () => {
+    const s = useCycleStore.getState();
+    expect(s.cycle).toBe(1);
+    expect(s.corruption).toBe(0);
+    expect(s.identityRevealed).toBe(false);
+  });
+
+  it('advanceCycle increments cycle and corruption', () => {
+    const s = useCycleStore.getState();
+    s.advanceCycle();
+    expect(useCycleStore.getState().cycle).toBe(2);
+    expect(useCycleStore.getState().corruption).toBe(1);
+  });
+
+  it('advanceCycle clamps at cycle=4, corruption=3', () => {
+    const s = useCycleStore.getState();
+    s.advanceCycle();
+    s.advanceCycle();
+    s.advanceCycle();
+    s.advanceCycle();   // would be cycle=5 if unclamped
+    s.advanceCycle();
+    expect(useCycleStore.getState().cycle).toBe(4);
+    expect(useCycleStore.getState().corruption).toBe(3);
+  });
+
+  it('revealIdentity flips identityRevealed', () => {
+    useCycleStore.getState().revealIdentity();
+    expect(useCycleStore.getState().identityRevealed).toBe(true);
+  });
+
+  it('reset returns to initial state', () => {
+    const s = useCycleStore.getState();
+    s.advanceCycle();
+    s.revealIdentity();
+    s.reset();
+    expect(useCycleStore.getState().cycle).toBe(1);
+    expect(useCycleStore.getState().corruption).toBe(0);
+    expect(useCycleStore.getState().identityRevealed).toBe(false);
+  });
+});
 ```
-version "4.10"
 
-// Includes added per-task as new ZScript classes are introduced.
-// Order matters when classes reference each other; cycle_manager is
-// included first because both ld_player and ld_statusbar look it up.
+- [ ] **Step 2: Run the test to verify it fails**
 
-#include "zscript/cycle_manager.zs"
-#include "zscript/ld_player.zs"
-#include "zscript/branded_pen.zs"
-#include "zscript/intern.zs"
-#include "zscript/neural_pulse.zs"
-#include "zscript/ld_statusbar.zs"
-```
-
-Note: we declare all the includes up front, even though the referenced files don't all exist yet. That's intentional — we'll make ZScript empty stubs as we go. Adding includes one-at-a-time would mean editing zscript.txt 6 times.
-
-- [ ] **Step 2: Create empty stub files for every include**
-
-Run:
 ```bash
-cd src
-touch zscript/cycle_manager.zs zscript/ld_player.zs zscript/branded_pen.zs \
-      zscript/intern.zs zscript/neural_pulse.zs zscript/ld_statusbar.zs
-ls zscript/
-cd ..
+cd /Users/justinwest/Repos/l0b0tonline
+npx vitest run components/loom/store/cycleStore.test.ts
 ```
-Expected: 6 empty .zs files exist.
+Expected: FAIL — `Cannot find module './cycleStore'`.
 
-- [ ] **Step 3: Verify the build still succeeds with empty ZScript files**
+- [ ] **Step 3: Implement `cycleStore`**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/store/cycleStore.ts`:
+```typescript
+import { create } from 'zustand';
+
+export type CycleNumber = 1 | 2 | 3 | 4;
+export type CorruptionLevel = 0 | 1 | 2 | 3;
+
+interface CycleState {
+  cycle: CycleNumber;
+  corruption: CorruptionLevel;
+  identityRevealed: boolean;
+
+  advanceCycle: () => void;
+  revealIdentity: () => void;
+  reset: () => void;
+}
+
+const initialState = {
+  cycle: 1 as CycleNumber,
+  corruption: 0 as CorruptionLevel,
+  identityRevealed: false,
+};
+
+export const useCycleStore = create<CycleState>((set) => ({
+  ...initialState,
+
+  advanceCycle: () =>
+    set((s) => ({
+      cycle: Math.min(4, s.cycle + 1) as CycleNumber,
+      corruption: Math.min(3, s.corruption + 1) as CorruptionLevel,
+    })),
+
+  revealIdentity: () => set({ identityRevealed: true }),
+
+  reset: () => set(initialState),
+}));
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-./tools/build.sh
+cd /Users/justinwest/Repos/l0b0tonline
+npx vitest run components/loom/store/cycleStore.test.ts
 ```
-Expected: `Built: ...` no errors.
-
-- [ ] **Step 4: Verify GZDoom launches with empty ZScript files**
-
-```bash
-./tools/play.sh CYC1_TEST
-```
-Expected: GZDoom launches into CYC1_TEST. **Watch the console output for any ZScript parse errors.** Empty files should parse cleanly.
-
-If you see "ZSCRIPT must include version directive" or similar — it means GZDoom isn't finding `zscript.txt`. Verify it lives at the PK3 root (not under `src/`):
-```bash
-unzip -l dist/loom-doom.pk3 | grep zscript
-```
-Expected: `zscript.txt` and `zscript/cycle_manager.zs`, etc., listed.
-
-Quit GZDoom.
+Expected: PASS — all 5 tests green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/zscript.txt src/zscript/
-git commit -m "Scaffold ZScript root with empty stubs for Phase 1 classes"
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/store/cycleStore.ts components/loom/store/cycleStore.test.ts
+git commit -m "Add LOOM cycleStore Zustand slice + tests
+
+Tracks current cycle (1-4) and corruption level (0-3) across the four
+simulation cycles. The HUD subscribes to this; identity-reveal trigger
+flips the identityRevealed flag in Phase 5."
 ```
 
 ---
 
-## Task 1.2: LD_CycleManager StaticEventHandler
+## Task 1.2: Hand-author `cyc1_test.json` map + map types
 
 **Files:**
-- Modify: `src/zscript/cycle_manager.zs`
-- Modify: `src/MAPINFO.txt`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/types.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/public/data/loom/maps/cyc1_test.json`
 
-- [ ] **Step 1: Write the LD_CycleManager class**
+- [ ] **Step 1: Define LOOM-internal types**
 
-Replace `src/zscript/cycle_manager.zs` content with:
-```
-// LD_CycleManager — global singleton tracking cycle state across maps.
-//
-// StaticEventHandler is GZDoom's idiom for game-wide state that survives
-// map transitions but is reset on game restart. (NOT save-game-persisted.)
-// Instances of this class are looked up via StaticEventHandler.Find().
-//
-// Cycle: 1..4  — which simulation cycle the player is in
-// Corruption: 0..3  — visual / mechanical corruption level for this cycle
-//   0 = clean (Cycle 1)
-//   1 = glitch (Cycle 2 — subtle)
-//   2 = lying (Cycle 3 — uncanny break)
-//   3 = dissolving (Cycle 4 — void)
-// Identity revealed: bool — true after player picks up The Hum (Phase 5).
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/types.ts`:
+```typescript
+// LOOM-internal type definitions.
 
-class LD_CycleManager : StaticEventHandler
-{
-    int currentCycle;
-    int corruptionLevel;
-    bool identityRevealed;
+import type { CycleNumber } from './store/cycleStore';
 
-    override void OnRegister()
-    {
-        currentCycle = 1;
-        corruptionLevel = 0;
-        identityRevealed = false;
-        Console.Printf("LD_CycleManager: registered, cycle=%d, corruption=%d", currentCycle, corruptionLevel);
-    }
+/** A cell value in a map's grid. 0 = empty/walkable, ≥1 = wall (texture index + 1). */
+export type GridCell = number;
 
-    // Convenience accessor used by other systems.
-    static clearscope LD_CycleManager Get()
-    {
-        return LD_CycleManager(StaticEventHandler.Find("LD_CycleManager"));
-    }
+/** An entity placed in the map: enemy spawn, player start, item, exit, etc. */
+export type ThingType =
+  | 'player_start'
+  | 'intern'
+  | 'exit'
+  // future: more enemy types, items, etc.
+  ;
+
+export interface MapThing {
+  type: ThingType;
+  /** Tile-coordinate position (not pixel). */
+  x: number;
+  y: number;
+  /** Facing in radians, 0 = east. Optional for static items. */
+  angle?: number;
+}
+
+export interface LoomMap {
+  id: string;             // "cyc1_test"
+  cycle: CycleNumber;
+  music?: string;         // track key for soundService; optional in Phase 1
+  /** Wall grid. grid[y][x] gives the cell at (x, y). 0 = walkable, n = wall texture index n-1. */
+  grid: GridCell[][];
+  /** Things placed in the map (enemies, player start, items). */
+  things: MapThing[];
+  /** Texture name lookup. textures[n-1] is the texture for grid value n. */
+  textures: string[];
+  /** Optional intermission text shown after the map ends. */
+  intermissionText?: string;
+}
+
+export interface PlayerState {
+  /** World-space position (in tile units, can be fractional). */
+  x: number;
+  y: number;
+  /** Facing in radians, 0 = east. */
+  angle: number;
+  health: number;
+  ammo: number;
+  /** Currently held weapon's slot. Slot 0 = neural pulse (always available). */
+  activeSlot: number;
+  /** Neural pulse charge meter, 0..1. */
+  pulseCharge: number;
 }
 ```
 
-- [ ] **Step 2: Register LD_CycleManager in MAPINFO**
+- [ ] **Step 2: Hand-author the placeholder map**
 
-Edit `src/MAPINFO.txt` and add the `AddEventHandlers` line inside the `gameinfo` block. Replace:
-```
-gameinfo
+Create `/Users/justinwest/Repos/l0b0tonline/public/data/loom/maps/cyc1_test.json`:
+```json
 {
-    titlepage = "TITLEPIC"
-    creditpage = "CREDIT"
-    intermissionmusic = "$MUSIC_DM2INT"
+  "id": "cyc1_test",
+  "cycle": 1,
+  "grid": [
+    [1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1]
+  ],
+  "things": [
+    { "type": "player_start", "x": 4, "y": 4, "angle": 0 },
+    { "type": "intern", "x": 1.5, "y": 1.5 },
+    { "type": "intern", "x": 6.5, "y": 1.5 },
+    { "type": "intern", "x": 1.5, "y": 6.5 }
+  ],
+  "textures": ["wall_lobby"],
+  "intermissionText": "TRACER BULLET COMPLETE."
 }
 ```
-with:
-```
-gameinfo
-{
-    titlepage = "TITLEPIC"
-    creditpage = "CREDIT"
-    intermissionmusic = "$MUSIC_DM2INT"
-    AddEventHandlers = "LD_CycleManager"
-}
-```
 
-- [ ] **Step 3: Build and run**
+This is an 8×8 tile map with walls around the border, a 6×6 walkable interior, player spawned in the middle, 3 Interns at three corners.
+
+- [ ] **Step 3: Verify the JSON parses**
 
 ```bash
-./tools/build.sh && ./tools/play.sh CYC1_TEST
+cd /Users/justinwest/Repos/l0b0tonline
+node -e "console.log('OK', JSON.parse(require('fs').readFileSync('public/data/loom/maps/cyc1_test.json','utf8')).id)"
 ```
+Expected: `OK cyc1_test`.
 
-- [ ] **Step 4: Verify CycleManager registered**
-
-In the GZDoom console (toggle with `~`), run:
-```
-logfile gzdoom.log
-```
-(or just visually scroll the launch console).
-
-Look for the line: `LD_CycleManager: registered, cycle=1, corruption=0`
-
-Expected: that exact string (with our values) appears once during startup.
-
-If not present:
-- Did you save MAPINFO.txt? (Re-run `./tools/build.sh` if you forgot.)
-- ZScript parse error in `cycle_manager.zs`? Check the console output for compile errors.
-- Class name mismatch? `AddEventHandlers` value must exactly match the class name `LD_CycleManager`.
-
-Quit GZDoom.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/zscript/cycle_manager.zs src/MAPINFO.txt
-git commit -m "Add LD_CycleManager StaticEventHandler with cycle/corruption state"
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/types.ts public/data/loom/maps/cyc1_test.json
+git commit -m "Add LOOM map types and the cyc1_test placeholder map
+
+8x8 grid, walls around the border, 6x6 walkable interior, player +
+3 Interns. Used for the Phase 1 tracer bullet."
 ```
 
 ---
 
-## Task 1.3: LD_Player class (extends DoomPlayer)
+## Task 1.3: Implement raycaster math + WebGL2 renderer
 
 **Files:**
-- Modify: `src/zscript/ld_player.zs`
-- Modify: `src/MAPINFO.txt`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/raycaster.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/raycaster.test.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/renderer.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/mapLoader.ts`
 
-- [ ] **Step 1: Write the LD_Player class**
+- [ ] **Step 1: Write raycaster tests**
 
-Replace `src/zscript/ld_player.zs` content with:
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/raycaster.test.ts`:
+```typescript
+import { describe, it, expect } from 'vitest';
+import { castRay } from './raycaster';
+import type { LoomMap } from '../types';
+
+const SIMPLE_MAP: LoomMap = {
+  id: 'test',
+  cycle: 1,
+  grid: [
+    [1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 1],
+    [1, 0, 0, 0, 1],
+    [1, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1],
+  ],
+  things: [],
+  textures: ['wall'],
+};
+
+describe('castRay', () => {
+  it('hits the east wall when looking east from center', () => {
+    // Player at (2.5, 2.5), looking east (angle=0). Map is 5 wide, walls at x=4.
+    const hit = castRay(SIMPLE_MAP, 2.5, 2.5, 0);
+    expect(hit.distance).toBeGreaterThan(1.4);
+    expect(hit.distance).toBeLessThan(1.6);
+    expect(hit.tileX).toBe(4);
+    expect(hit.tileY).toBe(2);
+  });
+
+  it('hits the north wall when looking north', () => {
+    // angle = -π/2 = looking up (-y). Wall at y=0.
+    const hit = castRay(SIMPLE_MAP, 2.5, 2.5, -Math.PI / 2);
+    expect(hit.distance).toBeGreaterThan(2.4);
+    expect(hit.distance).toBeLessThan(2.6);
+    expect(hit.tileY).toBe(0);
+  });
+
+  it('returns side flag for wall orientation (NS vs EW)', () => {
+    const hitEW = castRay(SIMPLE_MAP, 2.5, 2.5, 0); // east — hits a NS wall
+    const hitNS = castRay(SIMPLE_MAP, 2.5, 2.5, -Math.PI / 2); // north — hits an EW wall
+    expect(hitEW.side).not.toBe(hitNS.side);
+  });
+
+  it('reports the hit textureIndex from the grid value', () => {
+    const hit = castRay(SIMPLE_MAP, 2.5, 2.5, 0);
+    expect(hit.textureIndex).toBe(0); // grid value was 1 → texture index 0
+  });
+});
 ```
-// LD_Player — the player class for LOOM-DOOM. Extends DoomPlayer.
+
+- [ ] **Step 2: Run tests, verify they fail**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npx vitest run components/loom/engine/raycaster.test.ts
+```
+Expected: FAIL — `Cannot find module './raycaster'`.
+
+- [ ] **Step 3: Implement the raycaster**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/raycaster.ts`:
+```typescript
+// DDA-style raycaster for a 2D grid map. Casts a single ray from a position
+// at a given angle and returns the first wall-cell hit.
 //
-// In Phase 1 this is a thin wrapper. Future phases attach:
-//   - Neural Pulse charge meter
-//   - Identity-reveal trigger logic
-//   - Drum Stick rhythm meter
-//   - Cycle-aware sound + visual feedback
+// Reference: Lode Vandevenne's classic raycaster tutorial
+// (https://lodev.org/cgtutor/raycasting.html). The math is unchanged from
+// 1992-era game programming — we just typed it in TypeScript.
 
-class LD_Player : DoomPlayer
-{
-    Default
-    {
-        Player.DisplayName "Defective Unit";
-        Player.StartItem "BrandedPen";
-        Player.StartItem "Clip", 50;
+import type { LoomMap } from '../types';
+
+export interface RayHit {
+  /** Euclidean distance from origin to wall hit (in tile units). */
+  distance: number;
+  /** Grid cell of the wall that was hit. */
+  tileX: number;
+  tileY: number;
+  /** 0 = hit a NS wall (vertical edge); 1 = hit an EW wall (horizontal edge). */
+  side: 0 | 1;
+  /** Texture index for the wall (grid cell value minus 1). */
+  textureIndex: number;
+  /** Where on the wall slice we hit, 0..1 along the wall's tangent. Used for texture mapping. */
+  wallX: number;
+}
+
+/** Maximum tile-distance to march before giving up. Should exceed the largest map. */
+const MAX_DISTANCE = 64;
+
+export function castRay(
+  map: LoomMap,
+  originX: number,
+  originY: number,
+  angle: number,
+): RayHit {
+  const dirX = Math.cos(angle);
+  const dirY = Math.sin(angle);
+
+  let mapX = Math.floor(originX);
+  let mapY = Math.floor(originY);
+
+  // Length of ray from one x or y side to next x or y side
+  const deltaDistX = Math.abs(1 / dirX);
+  const deltaDistY = Math.abs(1 / dirY);
+
+  // Step direction and initial ray distance to nearest grid edge
+  const stepX = dirX < 0 ? -1 : 1;
+  const stepY = dirY < 0 ? -1 : 1;
+
+  let sideDistX =
+    dirX < 0 ? (originX - mapX) * deltaDistX : (mapX + 1 - originX) * deltaDistX;
+  let sideDistY =
+    dirY < 0 ? (originY - mapY) * deltaDistY : (mapY + 1 - originY) * deltaDistY;
+
+  let side: 0 | 1 = 0;
+  let distance = 0;
+
+  while (distance < MAX_DISTANCE) {
+    if (sideDistX < sideDistY) {
+      sideDistX += deltaDistX;
+      mapX += stepX;
+      side = 0;
+    } else {
+      sideDistY += deltaDistY;
+      mapY += stepY;
+      side = 1;
     }
+
+    if (mapY < 0 || mapY >= map.grid.length) break;
+    const row = map.grid[mapY];
+    if (!row || mapX < 0 || mapX >= row.length) break;
+    const cell = row[mapX];
+
+    if (cell > 0) {
+      // Hit a wall; compute perpendicular distance (avoids fish-eye)
+      distance =
+        side === 0
+          ? (mapX - originX + (1 - stepX) / 2) / dirX
+          : (mapY - originY + (1 - stepY) / 2) / dirY;
+      // Where on the wall did we hit, in [0,1)?
+      const wallXraw =
+        side === 0
+          ? originY + distance * dirY
+          : originX + distance * dirX;
+      const wallX = wallXraw - Math.floor(wallXraw);
+
+      return {
+        distance,
+        tileX: mapX,
+        tileY: mapY,
+        side,
+        textureIndex: cell - 1,
+        wallX,
+      };
+    }
+  }
+
+  // No hit — return a sentinel "infinite" hit
+  return {
+    distance: MAX_DISTANCE,
+    tileX: mapX,
+    tileY: mapY,
+    side,
+    textureIndex: -1,
+    wallX: 0,
+  };
 }
 ```
 
-`Player.StartItem "BrandedPen"` references the class we'll define in Task 1.4. GZDoom resolves this at runtime — defining LD_Player before BrandedPen is fine.
-
-- [ ] **Step 2: Register LD_Player as the player class in MAPINFO**
-
-Edit `src/MAPINFO.txt`. Inside the `gameinfo` block (already added in 1.2), add the `playerclasses` line:
-```
-gameinfo
-{
-    titlepage = "TITLEPIC"
-    creditpage = "CREDIT"
-    intermissionmusic = "$MUSIC_DM2INT"
-    AddEventHandlers = "LD_CycleManager"
-    playerclasses = "LD_Player"
-}
-```
-
-- [ ] **Step 3: Build and run**
+- [ ] **Step 4: Run tests, verify pass**
 
 ```bash
-./tools/build.sh && ./tools/play.sh CYC1_TEST
+cd /Users/justinwest/Repos/l0b0tonline
+npx vitest run components/loom/engine/raycaster.test.ts
 ```
+Expected: PASS — all 4 tests green. If any fail, reread the math and the test expectations carefully.
 
-Expected behavior in-game: player spawns. Pulling up the inventory or trying to fire will fail because `BrandedPen` doesn't exist yet — but the player class itself should load. Look for ZScript errors in the console.
+- [ ] **Step 5: Implement the WebGL2 renderer (minimal — flat-color walls for now)**
 
-If you see "Unknown actor 'BrandedPen'" — that's expected at this point. We'll fix it in Task 1.4. The class itself should still load.
-
-If you see "Unknown player class 'LD_Player'" — fix the MAPINFO `playerclasses` line.
-
-- [ ] **Step 4: Verify in console**
-
-Open GZDoom console (`~`) and run:
-```
-puke 0
-classlist | grep LD_Player
-```
-Expected: `LD_Player (Player class)` appears.
-
-Quit GZDoom.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/zscript/ld_player.zs src/MAPINFO.txt
-git commit -m "Add LD_Player class extending DoomPlayer; wire as default player class"
-```
-
----
-
-## Task 1.4: Branded Pen weapon (placeholder sprites + ZScript class)
-
-**Files:**
-- Create: `src/sprites/PENGA0.png` (placeholder)
-- Create: `src/sprites/PENGB0.png` (placeholder)
-- Modify: `src/zscript/branded_pen.zs`
-
-- [ ] **Step 1: Generate placeholder weapon sprites**
-
-We need 2 placeholder PNGs for the Branded Pen — one for the idle pose (PENGA0), one for the firing pose (PENGB0). Both should be ~60×40 px, transparent background, with a visible "PEN" indicator so we know it's our placeholder and not vanilla DOOM's pistol.
-
-If `python3` and Pillow are available, use this script. Save it as `tools/_gen_placeholder_sprites.py` (the leading underscore signals it's a one-off helper):
-```python
-#!/usr/bin/env python3
-# One-off helper to generate Phase 1 placeholder sprites.
-# Run from repo root: python3 tools/_gen_placeholder_sprites.py
-from PIL import Image, ImageDraw, ImageFont
-from pathlib import Path
-
-OUT = Path(__file__).resolve().parent.parent / "src" / "sprites"
-OUT.mkdir(parents=True, exist_ok=True)
-
-def make(name: str, w: int, h: int, text: str, bg=(50, 50, 30, 255), fg=(212, 165, 116, 255)):
-    img = Image.new("RGBA", (w, h), bg)
-    d = ImageDraw.Draw(img)
-    d.rectangle([(0, 0), (w-1, h-1)], outline=fg, width=2)
-    d.text((4, h // 2 - 6), text, fill=fg)
-    img.save(OUT / f"{name}.png")
-    print(f"wrote {OUT / (name + '.png')}")
-
-make("PENGA0", 80, 60, "PEN A")    # Branded Pen idle
-make("PENGB0", 80, 60, "PEN B!")   # Branded Pen firing
-```
-
-Run:
-```bash
-python3 tools/_gen_placeholder_sprites.py
-ls src/sprites/
-```
-Expected: `PENGA0.png` and `PENGB0.png` exist.
-
-If python3 / Pillow isn't available: open SLADE → New Entry → Image → 80×60 → fill with a dark color → save as `src/sprites/PENGA0.png`. Repeat for PENGB0.
-
-- [ ] **Step 2: Write the BrandedPen weapon class**
-
-Replace `src/zscript/branded_pen.zs` content with:
-```
-// Branded Pen — Slot 2 weapon. Functionally a vanilla Pistol, reskinned.
-// Click sound on every shot; LOOM-logo placeholder sprite for now.
-
-class BrandedPen : Pistol replaces Pistol
-{
-    Default
-    {
-        Weapon.SlotNumber 2;
-        Weapon.AmmoType "Clip";
-        Weapon.AmmoUse 1;
-        Weapon.AmmoGive 20;
-        Tag "Branded Pen";
-        Inventory.PickupMessage "You got a Branded Pen.";
-    }
-
-    States
-    {
-    Ready:
-        PENG A 1 A_WeaponReady;
-        Loop;
-    Deselect:
-        PENG A 1 A_Lower;
-        Loop;
-    Select:
-        PENG A 1 A_Raise;
-        Loop;
-    Fire:
-        PENG A 4;
-        PENG B 6 A_FirePistol;
-        PENG B 4 A_ReFire;
-        Goto Ready;
-    Flash:
-        PENG B 7 Bright A_Light1;
-        Goto LightDone;
-    Spawn:
-        PENG A -1;
-        Stop;
-    }
-}
-```
-
-A few things to note:
-- `replaces Pistol` means anywhere a Pistol would spawn (in maps, drops), our BrandedPen replaces it. This is the fastest way to swap a vanilla weapon.
-- `PENG A 1` references the sprite filename `PENGA0.png` (4-char base + frame letter A + the sprite-system implicit rotation 0 for non-rotating).
-- The `Spawn` state with `PENG A -1` is the world-spawn state when the weapon is dropped on the ground. Players see the same sprite as the first-person view — fine for placeholder.
-- `A_FirePistol` is the inherited Pistol firing action — single shot, hitscan damage. We'll reskin behavior beyond name/sprite in later phases if needed.
-
-- [ ] **Step 3: Build and run**
-
-```bash
-./tools/build.sh && ./tools/play.sh CYC1_TEST
-```
-
-- [ ] **Step 4: Verify Branded Pen works**
-
-In-game:
-- Player should spawn with the Branded Pen visible (the placeholder PNG should appear at the bottom-center of the screen as the first-person weapon view)
-- Press fire (default `Ctrl` or left mouse) — should fire and the PEN B sprite briefly appears
-- The sprite may appear in the wrong position (offset) — that's expected, we'll fix offsets in Task 1.4 Step 5
-
-If the weapon is invisible or the screen has no weapon at all:
-- Sprite filename mismatch: verify `PENGA0.png` exists in PK3 — `unzip -l dist/loom-doom.pk3 | grep PENG`
-- ZScript error: check the console at startup
-- Pistol replacement not picked up: check that `Player.StartItem "BrandedPen"` in `LD_Player` is correct
-
-- [ ] **Step 5: Set sprite offsets in SLADE**
-
-Sprite offsets determine how the weapon image is positioned relative to the screen anchor. Without correct offsets, the weapon hangs off the bottom of the screen or floats too high.
-
-Open `src/sprites/PENGA0.png` and `src/sprites/PENGB0.png` in SLADE (right-click → Open in tab). Use the Graphic Offsets tool:
-- For a weapon HUD sprite, click `Offsets` → `Set Type → Weapon (Centered)` → Save.
-- This stamps the offset into the PNG via grAb chunk.
-
-Re-run `./tools/build.sh && ./tools/play.sh CYC1_TEST` and verify the weapon now appears at a normal weapon-view position.
-
-(If you can't get SLADE to set offsets: the placeholder works visually even if offset, and we'll tune it during real-art passes in later phases. Don't block on perfect offsets here.)
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/sprites/PENGA0.png src/sprites/PENGB0.png src/zscript/branded_pen.zs tools/_gen_placeholder_sprites.py
-git commit -m "Add Branded Pen weapon (replaces Pistol) with placeholder sprites"
-```
-
----
-
-## Task 1.5: Intern enemy (placeholder sprites + ZScript class)
-
-**Files:**
-- Create: `src/sprites/INTRA0.png` through `src/sprites/INTRG0.png` (placeholders, 7 frames)
-- Create: `src/sprites/INTRH0.png`, `src/sprites/INTRI0.png` (death frames)
-- Modify: `src/zscript/intern.zs`
-- Modify: `tools/_gen_placeholder_sprites.py`
-- Modify: `src/maps/CYC1_TEST.wad` (replace placeholder monsters with Intern)
-
-- [ ] **Step 1: Extend the placeholder-sprite generator**
-
-Edit `tools/_gen_placeholder_sprites.py`. Replace the bottom (`make("PENG…")` lines) with:
-```python
-make("PENGA0", 80, 60, "PEN A")
-make("PENGB0", 80, 60, "PEN B!")
-
-# Intern enemy — single-rotation placeholder. Frames A-D = walking, E-G = attack, H-I = death.
-INT_BG = (40, 60, 40, 255)
-INT_FG = (180, 200, 160, 255)
-for letter, label in [
-    ("A", "INT 1"), ("B", "INT 2"), ("C", "INT 3"), ("D", "INT 4"),
-    ("E", "ATK 1"), ("F", "ATK 2"), ("G", "ATK 3"),
-    ("H", "DIE 1"), ("I", "DIE 2"),
-]:
-    make(f"INTR{letter}0", 50, 80, label, bg=INT_BG, fg=INT_FG)
-
-# Neural Pulse projectile — tiny purple square.
-NPLS_BG = (40, 0, 60, 255)
-NPLS_FG = (192, 132, 252, 255)
-make("NPLSA0", 16, 16, "*", bg=NPLS_BG, fg=NPLS_FG)
-```
-
-Run it:
-```bash
-python3 tools/_gen_placeholder_sprites.py
-ls src/sprites/
-```
-Expected: 9 INTR* + 2 PENG* + 1 NPLSA0 = 12 PNGs total.
-
-- [ ] **Step 2: Write the Monster_Intern class**
-
-Replace `src/zscript/intern.zs` content with:
-```
-// Intern — basic Cycle 1 enemy. Reskinned ZombieMan: same AI/stats,
-// new sprite + sound + name.
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/renderer.ts`:
+```typescript
+// WebGL2 renderer. Phase 1 is intentionally simple: it renders flat-shaded
+// walls (no textures yet) at internal 320x240 and scales to the canvas with
+// nearest-neighbor.
 //
-// LOOM lore: throws "I'll send a follow-up" memo projectiles. For Phase 1
-// the projectile behavior is inherited from ZombieMan (hitscan); we'll
-// swap to actual memo-projectiles in a later cycle pass.
+// Phase 4+ adds textures, sprites, post-processing (CRT/glitch). For now,
+// shade each column based on side (NS vs EW) and distance, output to canvas.
 
-class Intern : ZombieMan replaces ZombieMan
-{
-    Default
-    {
-        Health 20;
-        Speed 8;
-        Tag "Intern";
-        Obituary "%o was sidelined by an Intern.";
-    }
+import type { LoomMap } from '../types';
+import { castRay } from './raycaster';
 
-    States
-    {
-    Spawn:
-        INTR AB 10 A_Look;
-        Loop;
-    See:
-        INTR AABBCCDD 4 A_Chase;
-        Loop;
-    Missile:
-        INTR E 10 A_FaceTarget;
-        INTR F 8 A_PosAttack;
-        INTR E 8;
-        Goto See;
-    Pain:
-        INTR G 3;
-        INTR G 3 A_Pain;
-        Goto See;
-    Death:
-        INTR H 5;
-        INTR I 5 A_Scream;
-        INTR I 5 A_NoBlocking;
-        INTR I -1;
-        Stop;
-    Raise:
-        INTR I 5;
-        INTR H 5;
-        Goto See;
-    }
-}
-```
+const INTERNAL_W = 320;
+const INTERNAL_H = 240;
+const FOV = Math.PI / 3; // 60° field of view
 
-- [ ] **Step 3: Update the placeholder map to spawn Interns**
+const VS = `#version 300 es
+in vec2 a_pos;
+in vec2 a_uv;
+out vec2 v_uv;
+void main() {
+  v_uv = a_uv;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
 
-Open `src/maps/CYC1_TEST.wad` in SLADE. Open the map editor. In Things mode (`T`):
-- Replace the 3 placeholder monster things with Thing Type **3004** (Trooper / ZombieMan — replaced via DECORATE-style swap by our Intern class)
+const FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 outColor;
+uniform sampler2D u_tex;
+void main() {
+  outColor = texture(u_tex, v_uv);
+}`;
 
-Or equivalently, since we used `replaces ZombieMan` in the ZScript, anything you placed as a ZombieMan in Task 0.3 will already become an Intern at runtime. If your placed things were ZombieMen already, you don't need to re-edit the map.
+export class Renderer {
+  private gl: WebGL2RenderingContext;
+  private texture: WebGLTexture;
+  private framebuffer: Uint8ClampedArray;
 
-If you placed different monsters (Imps, etc.), edit them now to be ZombieMen so our `replaces` rule kicks in.
+  constructor(canvas: HTMLCanvasElement) {
+    const gl = canvas.getContext('webgl2');
+    if (!gl) throw new Error('WebGL2 not supported');
+    this.gl = gl;
 
-Save the map (`Cmd+S`) and the WAD (`File → Save`).
+    // Compile shaders
+    const vs = compileShader(gl, gl.VERTEX_SHADER, VS);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, FS);
+    const program = linkProgram(gl, vs, fs);
+    gl.useProgram(program);
 
-- [ ] **Step 4: Build and run**
+    // Fullscreen quad
+    const quadBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([
+        // x,    y,    u,   v
+        -1, -1, 0, 0,
+         1, -1, 1, 0,
+        -1,  1, 0, 1,
+        -1,  1, 0, 1,
+         1, -1, 1, 0,
+         1,  1, 1, 1,
+      ]),
+      gl.STATIC_DRAW,
+    );
 
-```bash
-./tools/build.sh && ./tools/play.sh CYC1_TEST
-```
+    const aPos = gl.getAttribLocation(program, 'a_pos');
+    const aUv  = gl.getAttribLocation(program, 'a_uv');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(aUv);
+    gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 16, 8);
 
-- [ ] **Step 5: Verify Interns work**
+    // Texture for the internal-resolution framebuffer
+    this.texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, INTERNAL_W, INTERNAL_H, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, null,
+    );
 
-In-game:
-- 3 Interns should be visible in the room (placeholder green-rectangle sprites)
-- They should walk toward the player
-- They should fire at the player
-- Player should be able to kill them with the Branded Pen — death animation plays (frames H, I)
-- Intern obituary should show "X was sidelined by an Intern" if you die to one
+    this.framebuffer = new Uint8ClampedArray(INTERNAL_W * INTERNAL_H * 4);
+  }
 
-If Interns appear as the original ZombieMan sprites:
-- The `replaces ZombieMan` declaration was lost — re-check `intern.zs`
-- The map's Thing IDs don't reference 3004 — re-check via SLADE
-
-If Interns appear invisible or at wrong scale:
-- Sprite offsets — open each INTR PNG in SLADE and `Offsets → Set Type → Monster`. Save.
-
-Quit GZDoom.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/zscript/intern.zs src/sprites/INTR*.png src/maps/CYC1_TEST.wad tools/_gen_placeholder_sprites.py
-git commit -m "Add Intern enemy (replaces ZombieMan) with placeholder sprites; spawn 3 in test map"
-```
-
----
-
-## Task 1.6: Neural Pulse — always-on Slot 0 weapon
-
-**Files:**
-- Create: `src/KEYCONF.txt`
-- Create: `src/sprites/NPLSA0.png` (already created in 1.5 Step 1; if missing, re-run sprite generator)
-- Modify: `src/zscript/neural_pulse.zs`
-- Modify: `src/MAPINFO.txt`
-- Modify: `src/zscript/ld_player.zs`
-
-The Neural Pulse is **not** a Weapon class. It's a body-mounted ability tied to a custom keybind. The pattern: a custom KEYCONF binding sends a `netevent` to ZScript; an EventHandler catches it and spawns a projectile from the player's position.
-
-- [ ] **Step 1: Write KEYCONF.txt**
-
-Create `src/KEYCONF.txt`:
-```
-addkeysection "LOOM-DOOM Controls" LoomDoom
-
-addmenukey "Fire Neural Pulse" lddoom_neuralpulse
-
-alias lddoom_neuralpulse "netevent NeuralPulseFire"
-
-defaultbind F "lddoom_neuralpulse"
-```
-
-This:
-- Adds a "LOOM-DOOM Controls" section to the controls menu
-- Adds a "Fire Neural Pulse" entry that the player can rebind
-- Registers a console alias `lddoom_neuralpulse` that issues a `netevent` named `NeuralPulseFire`
-- Default-binds the F key to the alias
-
-- [ ] **Step 2: Write the NeuralPulseProjectile actor + the handler**
-
-Replace `src/zscript/neural_pulse.zs` content with:
-```
-// NeuralPulseProjectile — the projectile fired from the player's headband.
-// Phase 1: low damage, slow recharge, single-target. Cycle evolution
-// (more damage, glitch visuals, involuntary firing in C4) lives in
-// later phases.
-
-class NeuralPulseProjectile : Actor
-{
-    Default
-    {
-        Radius 6;
-        Height 8;
-        Speed 30;
-        Damage 5;
-        Projectile;
-        +RANDOMIZE;
-        RenderStyle "Add";
-        Alpha 0.85;
-        SeeSound "weapons/neuralpulse_fire";
-    }
-
-    States
-    {
-    Spawn:
-        NPLS A 4 Bright;
-        Loop;
-    Death:
-        NPLS A 4 Bright;
-        Stop;
-    }
-}
-
-// NeuralPulseHandler — listens for the "NeuralPulseFire" netevent
-// (issued by KEYCONF alias when the player presses the bound key) and
-// fires a NeuralPulseProjectile from the active player's position.
-//
-// Phase 1: no recharge meter, no charge state — just fires immediately.
-// Phase 2 will add a CycleManager-aware charge timer.
-
-class NeuralPulseHandler : EventHandler
-{
-    override void NetworkProcess(ConsoleEvent e)
-    {
-        if (e.Name != "NeuralPulseFire")
-            return;
-
-        if (e.Player < 0 || e.Player >= MAXPLAYERS)
-            return;
-
-        let p = players[e.Player];
-        if (!p || !p.mo)
-            return;
-
-        // Spawn the projectile slightly in front of and above the player,
-        // aimed where they're looking. CMF_AIMDIRECTION uses the player's
-        // current view direction. Offsets are in map units.
-        p.mo.A_SpawnProjectile("NeuralPulseProjectile", 32 /*z offset*/, 0 /*x offset*/, 0 /*angle*/, CMF_AIMDIRECTION);
-    }
-}
-```
-
-`EventHandler` (not `StaticEventHandler`) is correct here because we want per-map registration that can be serialized into save games — though we don't take advantage of that yet, it's the right base class for input event handlers per the GZDoom wiki.
-
-- [ ] **Step 3: Register NeuralPulseHandler in MAPINFO**
-
-Edit `src/MAPINFO.txt`. Append `NeuralPulseHandler` to the `AddEventHandlers` list:
-```
-gameinfo
-{
-    titlepage = "TITLEPIC"
-    creditpage = "CREDIT"
-    intermissionmusic = "$MUSIC_DM2INT"
-    AddEventHandlers = "LD_CycleManager", "NeuralPulseHandler"
-    playerclasses = "LD_Player"
-}
-```
-
-- [ ] **Step 4: Build and run**
-
-```bash
-./tools/build.sh && ./tools/play.sh CYC1_TEST
-```
-
-- [ ] **Step 5: Verify Neural Pulse fires**
-
-In-game:
-- Press the **F** key (default Neural Pulse bind)
-- A small purple projectile (placeholder sprite) should fly from the player's view direction
-- It should travel until it hits a wall or an Intern
-- Hitting an Intern should damage them (Intern has 20 HP, projectile does 5 damage — 4 hits to kill)
-
-If F does nothing:
-- Check the GZDoom console for KEYCONF parse errors
-- Try opening the controls menu (`Esc → Customize Controls`) — there should be a "LOOM-DOOM Controls" section with "Fire Neural Pulse" entry. If missing, KEYCONF.txt didn't load (re-check filename / location).
-- In console, manually run: `netevent NeuralPulseFire` — this should fire a pulse without going through KEYCONF. If THIS works but F doesn't, it's a KEYCONF binding issue.
-
-If F triggers but no projectile appears:
-- ZScript error in `neural_pulse.zs` — check console
-- Sprite missing — `unzip -l dist/loom-doom.pk3 | grep NPLS`
-- The sound `weapons/neuralpulse_fire` doesn't exist — that's a soft warning, not a fatal error; ignore it for Phase 1 (we'll add real sounds in later phases)
-
-Quit GZDoom.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/KEYCONF.txt src/zscript/neural_pulse.zs src/MAPINFO.txt
-git commit -m "Add Neural Pulse Slot-0 weapon (KEYCONF bind + projectile + handler)"
-```
-
----
-
-## Task 1.7: LD_StatusBar — J0IN 0S terminal HUD
-
-**Files:**
-- Modify: `src/zscript/ld_statusbar.zs`
-- Modify: `src/MAPINFO.txt`
-
-- [ ] **Step 1: Write the LD_StatusBar class**
-
-Replace `src/zscript/ld_statusbar.zs` content with:
-```
-// LD_StatusBar — J0IN 0S terminal HUD.
-//
-// Phase 1: clean (corruption=0) mode only — green-on-black text strip
-// at the bottom of the screen showing unit ID, biometric (health), queue
-// (ammo), active weapon, and zone (current map name) plus a cycle line.
-//
-// Cycle 2-4 corruption modes (text glitching, lying values, dissolving)
-// will be added in Phase 3+ as the LD_CycleManager.corruptionLevel
-// evolves.
-
-class LD_StatusBar : BaseStatusBar
-{
-    HUDFont mHUDFont;
-
-    override void Init()
-    {
-        Super.Init();
-        // Use the default DOOM small font (HU_FONT) for now. Real font
-        // lives in a later phase.
-        Font fnt = Font.GetFont("HU_FONT");
-        mHUDFont = HUDFont.Create(fnt, 1, Mono_CellLeft, 1, 1);
-        SetSize(0, 320, 200);  // 0 = no fixed status bar height; HUD fills
-    }
-
-    override void Draw(int state, double TicFrac)
-    {
-        Super.Draw(state, TicFrac);
-
-        if (state == HUD_None || state == HUD_AltHUD)
-            return;
-
-        BeginHUD(1.0, false, 320, 200);
-
-        let mgr = LD_CycleManager.Get();
-        int cycle      = mgr ? mgr.currentCycle    : 1;
-        int corruption = mgr ? mgr.corruptionLevel : 0;
-
-        let pmo = CPlayer.mo;
-        if (!pmo) { return; }
-
-        int health = pmo.Health;
-        int ammo   = 0;
-        String activeWeapon = "neural_pulse.exe";
-
-        let curWeapon = CPlayer.ReadyWeapon;
-        if (curWeapon)
-        {
-            activeWeapon = curWeapon.GetTag().MakeLower() .. ".exe";
-            let amType   = curWeapon.AmmoType1;
-            if (amType)
-            {
-                let am = pmo.FindInventory(amType);
-                if (am) { ammo = am.Amount; }
-            }
+  render(map: LoomMap, playerX: number, playerY: number, playerAngle: number) {
+    // Clear framebuffer (sky on top, floor on bottom)
+    for (let y = 0; y < INTERNAL_H; y++) {
+      for (let x = 0; x < INTERNAL_W; x++) {
+        const idx = (y * INTERNAL_W + x) * 4;
+        if (y < INTERNAL_H / 2) {
+          // Ceiling: dark gray-green
+          this.framebuffer[idx]     = 18;
+          this.framebuffer[idx + 1] = 28;
+          this.framebuffer[idx + 2] = 18;
+        } else {
+          // Floor: slightly lighter
+          this.framebuffer[idx]     = 28;
+          this.framebuffer[idx + 1] = 28;
+          this.framebuffer[idx + 2] = 28;
         }
-
-        String zone = level.MapName.MakeLower();
-
-        // Layout: two lines, anchored bottom-left.
-        // Line 1: [unit#88-E] bio: 87% / queue: 24 / active: spam_filter.exe / zone: cyc1_test
-        // Line 2: > cycle 8492 // simulation nominal // surveillance: ON
-        String line1 = String.Format(
-            "[unit#88-E]  bio: %d%%  /  queue: %d  /  active: %s  /  zone: %s",
-            health, ammo, activeWeapon, zone
-        );
-
-        String simState = (corruption == 0) ? "nominal" :
-                          (corruption == 1) ? "drift detected" :
-                          (corruption == 2) ? "BREACH" : "DISSOLVING";
-        String line2 = String.Format(
-            "> cycle %d  //  simulation %s  //  surveillance: ON",
-            8491 + cycle, simState
-        );
-
-        // Anchor at bottom-left, with small padding.
-        DrawString(mHUDFont, line1, (4, -18), DI_SCREEN_LEFT_BOTTOM, Font.CR_GREEN);
-        DrawString(mHUDFont, line2, (4, -8),  DI_SCREEN_LEFT_BOTTOM, Font.CR_DARKGREEN);
+        this.framebuffer[idx + 3] = 255;
+      }
     }
+
+    // Cast one ray per output column
+    for (let col = 0; col < INTERNAL_W; col++) {
+      const cameraX = (2 * col) / INTERNAL_W - 1;          // -1..1
+      const rayAngle = playerAngle + Math.atan(cameraX * Math.tan(FOV / 2));
+      const hit = castRay(map, playerX, playerY, rayAngle);
+
+      // Project distance to wall slice height. Use perpendicular distance
+      // (already computed in raycaster) so vertical lines stay vertical.
+      const perpDist = hit.distance * Math.cos(rayAngle - playerAngle);
+      const sliceHeight = Math.min(INTERNAL_H, INTERNAL_H / Math.max(perpDist, 0.05));
+      const drawStart = Math.max(0, Math.floor((INTERNAL_H - sliceHeight) / 2));
+      const drawEnd = Math.min(INTERNAL_H, Math.floor((INTERNAL_H + sliceHeight) / 2));
+
+      // Side-based shading: EW walls slightly darker than NS walls
+      const sideDarken = hit.side === 1 ? 0.7 : 1.0;
+      // Distance-based shading
+      const distFog = Math.max(0.25, 1 - perpDist / 12);
+      const shade = sideDarken * distFog;
+
+      // Wall color: green-tinted for placeholder
+      const r = Math.floor(120 * shade);
+      const g = Math.floor(180 * shade);
+      const b = Math.floor(120 * shade);
+
+      for (let y = drawStart; y < drawEnd; y++) {
+        const idx = (y * INTERNAL_W + col) * 4;
+        this.framebuffer[idx]     = r;
+        this.framebuffer[idx + 1] = g;
+        this.framebuffer[idx + 2] = b;
+        this.framebuffer[idx + 3] = 255;
+      }
+    }
+
+    // Upload framebuffer to GPU and draw
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texSubImage2D(
+      gl.TEXTURE_2D, 0, 0, 0, INTERNAL_W, INTERNAL_H,
+      gl.RGBA, gl.UNSIGNED_BYTE, this.framebuffer,
+    );
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+}
+
+function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
+  const shader = gl.createShader(type);
+  if (!shader) throw new Error('createShader failed');
+  gl.shaderSource(shader, src);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(shader);
+    throw new Error(`shader compile failed: ${log}`);
+  }
+  return shader;
+}
+
+function linkProgram(gl: WebGL2RenderingContext, vs: WebGLShader, fs: WebGLShader): WebGLProgram {
+  const program = gl.createProgram();
+  if (!program) throw new Error('createProgram failed');
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(program);
+    throw new Error(`program link failed: ${log}`);
+  }
+  return program;
 }
 ```
 
-A few notes on the implementation choices:
-- We use `BeginHUD(1.0, false, 320, 200)` to declare the HUD's logical resolution as 320×200 (DOOM native). GZDoom auto-scales for higher resolutions.
-- `DI_SCREEN_LEFT_BOTTOM` anchors coordinates relative to the screen's lower-left corner. Negative Y values offset upward from the bottom edge.
-- Cycle number is displayed as `8491 + cycle` to match the spec's "Cycle 8492 / 8493 / etc." flavor text. (cycle=1 → "8492".)
-- We're using DOOM's `HU_FONT` for now. The real terminal-green pixelated font goes in Phase 6 polish.
+- [ ] **Step 6: Implement the map loader**
 
-- [ ] **Step 2: Register LD_StatusBar in MAPINFO**
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/mapLoader.ts`:
+```typescript
+import type { LoomMap } from '../types';
 
-Edit `src/MAPINFO.txt`. Inside the `gameinfo` block, add `statusbarclass`:
-```
-gameinfo
-{
-    titlepage = "TITLEPIC"
-    creditpage = "CREDIT"
-    intermissionmusic = "$MUSIC_DM2INT"
-    AddEventHandlers = "LD_CycleManager", "NeuralPulseHandler"
-    playerclasses = "LD_Player"
-    statusbarclass = "LD_StatusBar"
+/**
+ * Load a LOOM map from /public/data/loom/maps/<id>.json.
+ * Throws if the fetch fails or the JSON doesn't validate against our shape.
+ */
+export async function loadMap(id: string): Promise<LoomMap> {
+  const res = await fetch(`/data/loom/maps/${id}.json`);
+  if (!res.ok) {
+    throw new Error(`map fetch failed: ${id} (${res.status})`);
+  }
+  const data = (await res.json()) as unknown;
+  if (!isLoomMap(data)) {
+    throw new Error(`map ${id} failed schema validation`);
+  }
+  return data;
+}
+
+function isLoomMap(data: unknown): data is LoomMap {
+  if (typeof data !== 'object' || data === null) return false;
+  const m = data as Record<string, unknown>;
+  return (
+    typeof m.id === 'string' &&
+    typeof m.cycle === 'number' &&
+    Array.isArray(m.grid) &&
+    Array.isArray(m.things) &&
+    Array.isArray(m.textures)
+  );
 }
 ```
 
-- [ ] **Step 3: Build and run**
+- [ ] **Step 7: Type-check**
 
 ```bash
-./tools/build.sh && ./tools/play.sh CYC1_TEST
+cd /Users/justinwest/Repos/l0b0tonline
+npx tsc --noEmit 2>&1 | head -20
 ```
+Expected: no errors.
 
-- [ ] **Step 4: Verify the HUD renders**
-
-In-game:
-- The bottom-left of the screen should show two lines of green text:
-  - Line 1: `[unit#88-E]  bio: 100%  /  queue: 50  /  active: branded pen.exe  /  zone: cyc1_test`
-  - Line 2: `> cycle 8492  //  simulation nominal  //  surveillance: ON`
-- Take damage from an Intern: `bio:` value should drop in real-time
-- Fire the Branded Pen: `queue:` value should drop with each shot
-
-If the HUD doesn't appear:
-- Check `statusbarclass` spelling in MAPINFO.txt (matches class name exactly)
-- ZScript error in `ld_statusbar.zs` — check console
-- The HUD might be obscured by the default DOOM status bar — try `+screenblocks 11` in console (full HUD overlay mode)
-
-If text appears but looks wrong:
-- Coordinate system off — adjust the `(4, -18)` and `(4, -8)` offsets
-- Wrong font — try `Font.GetFont("CONFONT")` instead of `HU_FONT`
-
-Quit GZDoom.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/zscript/ld_statusbar.zs src/MAPINFO.txt
-git commit -m "Add LD_StatusBar (J0IN 0S terminal HUD, clean mode for Phase 1)"
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/engine/raycaster.ts components/loom/engine/raycaster.test.ts components/loom/engine/renderer.ts components/loom/engine/mapLoader.ts
+git commit -m "Add LOOM raycaster (DDA), WebGL2 renderer, map loader
+
+Phase 1 minimum viable rendering: per-column ray casting, flat-shaded
+walls at internal 320x240, scaled to canvas with nearest-neighbor.
+Texture sampling and sprites come in later tasks."
 ```
 
 ---
 
-## Task 1.8: Phase 1 integration playtest + final commit
+## Task 1.4: Game loop + player input + wire renderer into LOOMGame
 
 **Files:**
-- Create: `docs/playtests/2026-04-27-phase-1-tracer-bullet.md`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/input.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/player.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/LOOMGame.tsx`
+
+- [ ] **Step 1: Implement input controller**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/input.ts`:
+```typescript
+/**
+ * Keyboard + pointer-lock mouse-look input. Owned by the game loop; reads
+ * its current state synchronously each tick.
+ */
+export class InputController {
+  private keys = new Set<string>();
+  private mouseDeltaX = 0;
+  /** Pending mouse-fire flag (consumed each tick). */
+  private firePrimary = false;
+  private firePulse = false;
+
+  constructor(canvas: HTMLCanvasElement) {
+    canvas.tabIndex = 0;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      this.keys.add(e.code);
+      if (e.code === 'KeyF') this.firePulse = true;
+    };
+    const onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code);
+    const onMouseMove = (e: MouseEvent) => {
+      if (document.pointerLockElement === canvas) {
+        this.mouseDeltaX += e.movementX;
+      }
+    };
+    const onClick = () => {
+      if (document.pointerLockElement === canvas) {
+        this.firePrimary = true;
+      } else {
+        canvas.requestPointerLock();
+      }
+    };
+
+    canvas.addEventListener('keydown', onKeyDown);
+    canvas.addEventListener('keyup', onKeyUp);
+    canvas.addEventListener('mousemove', onMouseMove);
+    canvas.addEventListener('click', onClick);
+
+    // Cleanup hook (caller should manage lifecycle)
+    this._cleanup = () => {
+      canvas.removeEventListener('keydown', onKeyDown);
+      canvas.removeEventListener('keyup', onKeyUp);
+      canvas.removeEventListener('mousemove', onMouseMove);
+      canvas.removeEventListener('click', onClick);
+    };
+  }
+
+  private _cleanup: () => void;
+
+  isDown(code: string): boolean {
+    return this.keys.has(code);
+  }
+
+  /** Consume mouse delta — call once per tick and act on it. */
+  consumeMouseDelta(): number {
+    const dx = this.mouseDeltaX;
+    this.mouseDeltaX = 0;
+    return dx;
+  }
+
+  consumeFirePrimary(): boolean {
+    const f = this.firePrimary;
+    this.firePrimary = false;
+    return f;
+  }
+
+  consumeFirePulse(): boolean {
+    const f = this.firePulse;
+    this.firePulse = false;
+    return f;
+  }
+
+  destroy() {
+    this._cleanup();
+  }
+}
+```
+
+- [ ] **Step 2: Implement Player**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/player.ts`:
+```typescript
+import type { LoomMap, PlayerState } from '../types';
+import type { InputController } from '../engine/input';
+
+const MOVE_SPEED = 3.0;          // tiles per second
+const TURN_SPEED = 0.0025;       // radians per pixel of mouse movement
+const PULSE_RECHARGE_RATE = 1 / 3; // full charge in 3s
+
+export class Player implements PlayerState {
+  x: number;
+  y: number;
+  angle: number;
+  health = 100;
+  ammo = 50;
+  activeSlot = 2; // Branded Pen by default
+  pulseCharge = 1;
+
+  constructor(spawnX: number, spawnY: number, spawnAngle: number) {
+    this.x = spawnX;
+    this.y = spawnY;
+    this.angle = spawnAngle;
+  }
+
+  update(dt: number, input: InputController, map: LoomMap) {
+    // Mouse look
+    const dx = input.consumeMouseDelta();
+    this.angle += dx * TURN_SPEED;
+
+    // Movement (WASD)
+    let mx = 0;
+    let my = 0;
+    if (input.isDown('KeyW')) { mx += Math.cos(this.angle); my += Math.sin(this.angle); }
+    if (input.isDown('KeyS')) { mx -= Math.cos(this.angle); my -= Math.sin(this.angle); }
+    if (input.isDown('KeyA')) { mx += Math.cos(this.angle - Math.PI / 2); my += Math.sin(this.angle - Math.PI / 2); }
+    if (input.isDown('KeyD')) { mx += Math.cos(this.angle + Math.PI / 2); my += Math.sin(this.angle + Math.PI / 2); }
+
+    // Normalize diagonals
+    const len = Math.hypot(mx, my);
+    if (len > 0) {
+      mx /= len;
+      my /= len;
+    }
+
+    const newX = this.x + mx * MOVE_SPEED * dt;
+    const newY = this.y + my * MOVE_SPEED * dt;
+
+    // Simple grid-cell collision: don't move into a wall cell. Check X and Y
+    // independently for wall-sliding behavior.
+    if (!isWallAt(map, newX, this.y)) this.x = newX;
+    if (!isWallAt(map, this.x, newY)) this.y = newY;
+
+    // Recharge pulse
+    this.pulseCharge = Math.min(1, this.pulseCharge + PULSE_RECHARGE_RATE * dt);
+  }
+}
+
+function isWallAt(map: LoomMap, x: number, y: number): boolean {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  if (iy < 0 || iy >= map.grid.length) return true;
+  const row = map.grid[iy];
+  if (!row || ix < 0 || ix >= row.length) return true;
+  return row[ix] > 0;
+}
+```
+
+- [ ] **Step 3: Implement the game loop**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`:
+```typescript
+import type { LoomMap } from '../types';
+import { Player } from '../entities/player';
+import { InputController } from './input';
+import { Renderer } from './renderer';
+
+export class GameLoop {
+  private rafHandle: number | null = null;
+  private lastTimeMs = 0;
+  private renderer: Renderer;
+  private input: InputController;
+  private player: Player;
+  private map: LoomMap;
+
+  constructor(canvas: HTMLCanvasElement, map: LoomMap) {
+    this.map = map;
+    this.renderer = new Renderer(canvas);
+    this.input = new InputController(canvas);
+
+    const spawn = map.things.find((t) => t.type === 'player_start');
+    if (!spawn) throw new Error('map has no player_start');
+    this.player = new Player(spawn.x, spawn.y, spawn.angle ?? 0);
+  }
+
+  start() {
+    this.lastTimeMs = performance.now();
+    const tick = (nowMs: number) => {
+      const dt = Math.min(0.1, (nowMs - this.lastTimeMs) / 1000);
+      this.lastTimeMs = nowMs;
+      this.player.update(dt, this.input, this.map);
+      this.renderer.render(this.map, this.player.x, this.player.y, this.player.angle);
+      this.rafHandle = requestAnimationFrame(tick);
+    };
+    this.rafHandle = requestAnimationFrame(tick);
+  }
+
+  stop() {
+    if (this.rafHandle !== null) {
+      cancelAnimationFrame(this.rafHandle);
+      this.rafHandle = null;
+    }
+    this.input.destroy();
+  }
+
+  /** Exposed for HUD and weapon code in later tasks. */
+  getPlayer(): Player {
+    return this.player;
+  }
+}
+```
+
+- [ ] **Step 4: Wire into LOOMGame**
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/LOOMGame.tsx`. Replace the file's entire content with:
+```tsx
+import { useEffect, useRef, useState } from 'react';
+import { BootSequence } from './loom/hud/BootSequence';
+import { loadMap } from './loom/engine/mapLoader';
+import { GameLoop } from './loom/engine/gameLoop';
+
+interface LoomGameProps {
+  id: string;
+  onClose: () => void;
+}
+
+export default function LOOMGame(_props: LoomGameProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [booted, setBooted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!booted || !canvasRef.current) return;
+    let loop: GameLoop | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const map = await loadMap('cyc1_test');
+        if (cancelled || !canvasRef.current) return;
+        loop = new GameLoop(canvasRef.current, map);
+        loop.start();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+      loop?.stop();
+    };
+  }, [booted]);
+
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-black">
+      <canvas
+        ref={canvasRef}
+        className="h-full w-full"
+        style={{ imageRendering: 'pixelated' }}
+        width={640}
+        height={480}
+      />
+      {!booted && <BootSequence onComplete={() => setBooted(true)} />}
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/80 font-mono text-sm text-red-400">
+          ERROR: {error}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 5: Type-check + manual smoke test**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npx tsc --noEmit 2>&1 | head -20
+```
+Expected: clean.
+
+```bash
+npm run dev
+```
+Open http://localhost:5173, boot J0IN 0S, run LOOM.EXE. After the boot sequence:
+- The black canvas becomes a rendered first-person view of the placeholder room (greenish walls)
+- Click the canvas — pointer lock engages
+- WASD moves you around
+- Mouse turns you
+- Walls block movement
+- No console errors
+
+Quit when done.
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/engine/input.ts components/loom/engine/gameLoop.ts components/loom/entities/player.ts components/LOOMGame.tsx
+git commit -m "Add LOOM game loop, player movement, and wire renderer into LOOMGame
+
+Player can now WASD-walk a single placeholder room with mouse-look via
+pointer lock. Grid-cell collision keeps them inside walls. Frame loop
+runs requestAnimationFrame at internal 320x240 scaled to canvas."
+```
+
+---
+
+## Task 1.5: Branded Pen weapon (placeholder sprite + hitscan logic)
+
+**Files:**
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/IWeapon.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/brandedPen.ts`
+
+- [ ] **Step 1: Write the IWeapon interface**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/IWeapon.ts`:
+```typescript
+import type { Player } from '../player';
+import type { LoomMap } from '../../types';
+
+/**
+ * IWeapon — common interface for held weapons (slot 1+).
+ * Slot 0 (Neural Pulse) is structurally different; it's not an IWeapon.
+ */
+export interface IWeapon {
+  /** Display name for the HUD. */
+  readonly name: string;
+  /** Slot number (1-7). */
+  readonly slot: number;
+  /** Try to fire. Returns true if a shot fired (for ammo decrement, sound, etc.). */
+  fire(player: Player, map: LoomMap): boolean;
+}
+```
+
+- [ ] **Step 2: Implement Branded Pen**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/brandedPen.ts`:
+```typescript
+import type { IWeapon } from './IWeapon';
+import type { Player } from '../player';
+import type { LoomMap } from '../../types';
+import { castRay } from '../../engine/raycaster';
+
+const DAMAGE = 10;
+const RANGE = 16;
+
+/**
+ * Branded Pen — slot 2. Hitscan single-shot. Damages the first enemy or wall
+ * the ray hits within RANGE tiles. For Phase 1 we only damage walls (a no-op);
+ * Task 1.7 wires up enemy-hit logic.
+ */
+export class BrandedPen implements IWeapon {
+  readonly name = 'Branded Pen';
+  readonly slot = 2;
+
+  fire(player: Player, map: LoomMap): boolean {
+    if (player.ammo <= 0) return false;
+    player.ammo -= 1;
+
+    const hit = castRay(map, player.x, player.y, player.angle);
+    if (hit.distance <= RANGE) {
+      // Phase 1.5 + 1.7: when enemies exist, this is where we'd find the
+      // closest enemy along the ray and damage it. For now, the wall hit
+      // proves the ray-resolution path works.
+      void DAMAGE;
+    }
+
+    return true;
+  }
+}
+```
+
+(The `DAMAGE` constant + `void DAMAGE` looks awkward but signals intent: this is the value Task 1.7 will use when the enemy-hit logic is wired in. Removing it entirely would lose the design intent.)
+
+- [ ] **Step 3: Type-check**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npx tsc --noEmit 2>&1 | head -10
+```
+Expected: clean.
+
+- [ ] **Step 4: Wire firing into the game loop**
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`. Add Branded Pen handling — change the `start()` method's tick function to also handle weapon firing:
+
+Find this block:
+```typescript
+this.player.update(dt, this.input, this.map);
+this.renderer.render(this.map, this.player.x, this.player.y, this.player.angle);
+```
+
+Replace it with:
+```typescript
+this.player.update(dt, this.input, this.map);
+if (this.input.consumeFirePrimary()) {
+  this.brandedPen.fire(this.player, this.map);
+}
+this.renderer.render(this.map, this.player.x, this.player.y, this.player.angle);
+```
+
+Add the import and instance at the top of `GameLoop`:
+```typescript
+import { BrandedPen } from '../entities/weapons/brandedPen';
+// …existing imports
+
+export class GameLoop {
+  // …existing fields
+  private brandedPen = new BrandedPen();
+  // …
+}
+```
+
+- [ ] **Step 5: Manual smoke test**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev
+```
+Open the game. Click the canvas to enter pointer lock. Click again to fire — confirm the player's ammo drops in the console (we'll wire the HUD in Task 1.8). Add a temporary log if needed:
+```typescript
+console.log('ammo', this.player.ammo);
+```
+Remove the log before committing.
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/entities/weapons/IWeapon.ts components/loom/entities/weapons/brandedPen.ts components/loom/engine/gameLoop.ts
+git commit -m "Add Branded Pen weapon + IWeapon interface; wire fire to mouse click
+
+Hitscan ray of damage and range constants in place. Enemy-hit resolution
+arrives in Task 1.7 once the Intern actor exists."
+```
+
+---
+
+## Task 1.6: Neural Pulse always-on weapon (F key)
+
+**Files:**
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/neuralPulse.ts`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`
+
+- [ ] **Step 1: Implement Neural Pulse**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/neuralPulse.ts`:
+```typescript
+import type { Player } from '../player';
+import type { LoomMap } from '../../types';
+import { castRay } from '../../engine/raycaster';
+
+const DAMAGE = 5;
+const RANGE = 12;
+const COST = 1; // full charge consumed per shot
+
+/**
+ * Neural Pulse — slot 0, always available. Body-mounted; fires from the
+ * headband regardless of which weapon is currently held. Recharges over ~3s
+ * (managed in Player.update). No ammo, just charge.
+ */
+export class NeuralPulse {
+  readonly name = 'Neural Pulse';
+  readonly slot = 0;
+
+  fire(player: Player, map: LoomMap): boolean {
+    if (player.pulseCharge < COST) return false;
+    player.pulseCharge -= COST;
+
+    const hit = castRay(map, player.x, player.y, player.angle);
+    if (hit.distance <= RANGE) {
+      // Same TODO as Branded Pen: enemy-hit wiring in Task 1.7.
+      void DAMAGE;
+    }
+
+    return true;
+  }
+}
+```
+
+- [ ] **Step 2: Wire firing into the game loop**
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`. Add a `NeuralPulse` instance and consume the F-fire flag:
+
+Add the import:
+```typescript
+import { NeuralPulse } from '../entities/weapons/neuralPulse';
+```
+
+Add the field:
+```typescript
+private neuralPulse = new NeuralPulse();
+```
+
+Update the tick logic:
+```typescript
+this.player.update(dt, this.input, this.map);
+if (this.input.consumeFirePrimary()) {
+  this.brandedPen.fire(this.player, this.map);
+}
+if (this.input.consumeFirePulse()) {
+  this.neuralPulse.fire(this.player, this.map);
+}
+this.renderer.render(this.map, this.player.x, this.player.y, this.player.angle);
+```
+
+- [ ] **Step 3: Manual smoke test**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev
+```
+Open the game. After pointer lock, press F. Confirm `player.pulseCharge` drops to 0 (temporary console.log if needed) and recharges back to 1 over ~3s. Remove debug logs.
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/entities/weapons/neuralPulse.ts components/loom/engine/gameLoop.ts
+git commit -m "Add Neural Pulse always-on weapon, bound to F key
+
+Slot 0; charge meter consumed per shot, recharges over 3s. The body-
+mounted headband framing comes through visually in Phase 4 when the
+HUD shows pulse charge."
+```
+
+---
+
+## Task 1.7: Intern enemy + AI + sprite rendering
+
+**Files:**
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/enemies/intern.ts`
+- Create: `/Users/justinwest/Repos/l0b0tonline/public/data/loom/sprites/intern_idle.png` (placeholder)
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/renderer.ts`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/brandedPen.ts`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/neuralPulse.ts`
+
+- [ ] **Step 1: Create a placeholder Intern sprite**
+
+The simplest thing that works: a 32×64 PNG with a green-on-dark filled rectangle and a small dot for the "head." If you have access to an image tool:
+- Open any image editor / paint program
+- Create 32×64 transparent PNG
+- Fill with a dark olive green (#5e6b3a)
+- Add a slightly lighter rectangle for the head/body
+- Save as `/Users/justinwest/Repos/l0b0tonline/public/data/loom/sprites/intern_idle.png`
+
+Or generate via `node` + `sharp` / `pngjs` if available — but a 32×64 placeholder rendered in any tool works. **Just commit one PNG; we're not asking the engineer to make sprite animations yet — those come in Task 1.8 / later phases.**
+
+- [ ] **Step 2: Implement the Intern**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/enemies/intern.ts`:
+```typescript
+import type { Player } from '../player';
+import type { LoomMap } from '../../types';
+
+const HEALTH = 20;
+const SPEED = 1.0;        // tiles per second
+const SIGHT_RANGE = 8;    // tiles
+
+export type EnemyState = 'idle' | 'chase' | 'pain' | 'dead';
+
+export class Intern {
+  x: number;
+  y: number;
+  health = HEALTH;
+  state: EnemyState = 'idle';
+
+  constructor(x: number, y: number) {
+    this.x = x;
+    this.y = y;
+  }
+
+  update(dt: number, player: Player, _map: LoomMap) {
+    if (this.state === 'dead') return;
+
+    const dx = player.x - this.x;
+    const dy = player.y - this.y;
+    const dist = Math.hypot(dx, dy);
+
+    if (this.state === 'idle' && dist < SIGHT_RANGE) {
+      this.state = 'chase';
+    }
+
+    if (this.state === 'chase') {
+      const move = SPEED * dt;
+      if (dist > 0.5) {
+        this.x += (dx / dist) * move;
+        this.y += (dy / dist) * move;
+      }
+    }
+  }
+
+  takeDamage(damage: number) {
+    if (this.state === 'dead') return;
+    this.health -= damage;
+    if (this.health <= 0) {
+      this.health = 0;
+      this.state = 'dead';
+      return;
+    }
+    this.state = 'pain';
+    // Auto-recover after a brief moment (in real game, animate pain frames)
+    setTimeout(() => {
+      if (this.state === 'pain') this.state = 'chase';
+    }, 200);
+  }
+}
+```
+
+- [ ] **Step 3: Add enemy hit-detection helper**
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/loom/entities/weapons/brandedPen.ts`. Replace `fire` with a version that takes the enemy list and resolves hits:
+```typescript
+import type { IWeapon } from './IWeapon';
+import type { Player } from '../player';
+import type { LoomMap } from '../../types';
+import type { Intern } from '../enemies/intern';
+import { castRay } from '../../engine/raycaster';
+
+const DAMAGE = 10;
+const RANGE = 16;
+
+export class BrandedPen implements IWeapon {
+  readonly name = 'Branded Pen';
+  readonly slot = 2;
+
+  fire(player: Player, map: LoomMap, enemies: Intern[]): boolean {
+    if (player.ammo <= 0) return false;
+    player.ammo -= 1;
+
+    const wallHit = castRay(map, player.x, player.y, player.angle);
+
+    // Find first live enemy along the ray, closer than the wall hit.
+    const dirX = Math.cos(player.angle);
+    const dirY = Math.sin(player.angle);
+    let closest: { enemy: Intern; dist: number } | null = null;
+    for (const e of enemies) {
+      if (e.state === 'dead') continue;
+      const ex = e.x - player.x;
+      const ey = e.y - player.y;
+      const along = ex * dirX + ey * dirY;
+      if (along <= 0 || along > RANGE) continue;
+      const perp = Math.abs(ex * dirY - ey * dirX);
+      if (perp > 0.4) continue; // off-axis miss tolerance
+      if (along > wallHit.distance) continue;
+      if (!closest || along < closest.dist) closest = { enemy: e, dist: along };
+    }
+
+    if (closest) closest.enemy.takeDamage(DAMAGE);
+    return true;
+  }
+}
+```
+
+Apply the same pattern to `neuralPulse.ts` (with `DAMAGE = 5`, `RANGE = 12`):
+```typescript
+// near the top:
+import type { Intern } from '../enemies/intern';
+
+// fire signature:
+fire(player: Player, map: LoomMap, enemies: Intern[]): boolean {
+  if (player.pulseCharge < 1) return false;
+  player.pulseCharge -= 1;
+
+  const wallHit = castRay(map, player.x, player.y, player.angle);
+  const dirX = Math.cos(player.angle);
+  const dirY = Math.sin(player.angle);
+  let closest: { enemy: Intern; dist: number } | null = null;
+  for (const e of enemies) {
+    if (e.state === 'dead') continue;
+    const ex = e.x - player.x;
+    const ey = e.y - player.y;
+    const along = ex * dirX + ey * dirY;
+    if (along <= 0 || along > 12) continue;
+    const perp = Math.abs(ex * dirY - ey * dirX);
+    if (perp > 0.4) continue;
+    if (along > wallHit.distance) continue;
+    if (!closest || along < closest.dist) closest = { enemy: e, dist: along };
+  }
+  if (closest) closest.enemy.takeDamage(5);
+  return true;
+}
+```
+
+- [ ] **Step 4: Spawn Interns + tick them in the game loop**
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`. Add Intern handling:
+
+```typescript
+// imports
+import { Intern } from '../entities/enemies/intern';
+
+// add field:
+private enemies: Intern[] = [];
+
+// in constructor, after `this.player = ...`:
+for (const t of map.things) {
+  if (t.type === 'intern') {
+    this.enemies.push(new Intern(t.x, t.y));
+  }
+}
+
+// tick — replace the relevant block:
+this.player.update(dt, this.input, this.map);
+for (const e of this.enemies) e.update(dt, this.player, this.map);
+if (this.input.consumeFirePrimary()) this.brandedPen.fire(this.player, this.map, this.enemies);
+if (this.input.consumeFirePulse())   this.neuralPulse.fire(this.player, this.map, this.enemies);
+this.renderer.render(this.map, this.player.x, this.player.y, this.player.angle, this.enemies);
+```
+
+- [ ] **Step 5: Add sprite billboarding to the renderer**
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/renderer.ts`. Update `render` signature and add sprite drawing.
+
+Replace the `render` method's signature with:
+```typescript
+render(map: LoomMap, playerX: number, playerY: number, playerAngle: number, enemies: Intern[]) {
+```
+
+Add the import at the top: `import type { Intern } from '../entities/enemies/intern';`
+
+Track per-column wall depth so we can z-test sprites against walls. Replace the wall loop with one that also writes a `zBuffer`:
+
+Modify the wall loop section to maintain a `zBuffer: number[]` of length `INTERNAL_W`. Initialize before the loop:
+```typescript
+const zBuffer = new Array<number>(INTERNAL_W);
+```
+
+Inside the per-column loop, after computing `perpDist`, add `zBuffer[col] = perpDist;` before the wall draw.
+
+Then after the wall loop, draw sprites:
+```typescript
+// Sprite billboarding pass — draw enemies as colored rectangles for Phase 1
+// (textured sprites added later). Sort back-to-front for correct overlap.
+const livingEnemies = enemies.filter((e) => e.state !== 'dead');
+const sortedEnemies = livingEnemies
+  .map((e) => ({ e, dist: Math.hypot(e.x - playerX, e.y - playerY) }))
+  .sort((a, b) => b.dist - a.dist);
+
+for (const { e, dist } of sortedEnemies) {
+  // Vector from player to enemy
+  const ex = e.x - playerX;
+  const ey = e.y - playerY;
+  // Project into camera space: rotate by -playerAngle
+  const cosA = Math.cos(-playerAngle);
+  const sinA = Math.sin(-playerAngle);
+  const cx = ex * cosA - ey * sinA;
+  const cy = ex * sinA + ey * cosA;
+  if (cx <= 0.1) continue; // behind player
+
+  const screenX = Math.floor((INTERNAL_W / 2) * (1 + cy / cx / Math.tan(FOV / 2)));
+  const spriteHeight = Math.min(INTERNAL_H, INTERNAL_H / cx);
+  const drawStartY = Math.floor((INTERNAL_H - spriteHeight) / 2);
+  const drawEndY = Math.floor((INTERNAL_H + spriteHeight) / 2);
+  const spriteWidth = Math.floor(spriteHeight * 0.5); // Intern is taller than wide
+  const drawStartX = Math.max(0, screenX - Math.floor(spriteWidth / 2));
+  const drawEndX = Math.min(INTERNAL_W - 1, screenX + Math.floor(spriteWidth / 2));
+
+  for (let x = drawStartX; x <= drawEndX; x++) {
+    if (x < 0 || x >= INTERNAL_W) continue;
+    if (zBuffer[x] !== undefined && cx > zBuffer[x]) continue; // behind a wall
+    for (let y = Math.max(0, drawStartY); y < Math.min(INTERNAL_H, drawEndY); y++) {
+      const idx = (y * INTERNAL_W + x) * 4;
+      this.framebuffer[idx]     = 100;
+      this.framebuffer[idx + 1] = 140;
+      this.framebuffer[idx + 2] = 80;
+      this.framebuffer[idx + 3] = 255;
+    }
+  }
+}
+```
+
+This is intentionally crude — colored rectangles where each Intern is. Real sprite textures arrive in a later phase; for Phase 1, "I can see and shoot a thing in 3D space" is the goal.
+
+- [ ] **Step 6: Manual smoke test**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev
+```
+Open the game. After boot:
+- 3 olive-green rectangles visible — the 3 Interns
+- They walk toward the player when within 8 tiles
+- Click fire — Branded Pen kills Interns (3 hits each at 10 damage; HP 20)
+- Press F — Neural Pulse weakens them
+- Each killed Intern stops moving and disappears (well, its rect doesn't draw because state==='dead')
+
+If the rays don't hit reliably: the perpendicular tolerance constant `0.4` may need tuning. Adjust and retest.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/entities/enemies/intern.ts components/loom/entities/weapons/brandedPen.ts components/loom/entities/weapons/neuralPulse.ts components/loom/engine/gameLoop.ts components/loom/engine/renderer.ts public/data/loom/sprites/intern_idle.png
+git commit -m "Add Intern enemy + sprite billboarding + weapon hit resolution
+
+Interns chase the player when within 8 tiles, take damage from Branded
+Pen (10 dmg) and Neural Pulse (5 dmg), die at 0 HP. Renderer draws
+billboarded sprite columns z-tested against the wall depth buffer."
+```
+
+---
+
+## Task 1.8: `LoomHud` React overlay
+
+**Files:**
+- Create: `/Users/justinwest/Repos/l0b0tonline/components/loom/hud/LoomHud.tsx`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/LOOMGame.tsx`
+- Modify: `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`
+
+- [ ] **Step 1: Expose player state to React**
+
+The HUD needs to read player state every frame. Simplest pattern: `GameLoop` exposes a `getSnapshot()` method that React polls via `useSyncExternalStore`, and we wire the cycleStore in directly.
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/loom/engine/gameLoop.ts`. Add a snapshot method:
+```typescript
+// Add an interface near the top of the file:
+export interface GameSnapshot {
+  health: number;
+  ammo: number;
+  pulseCharge: number;
+  activeSlot: number;
+  zone: string;
+}
+
+// Then in GameLoop:
+getSnapshot(): GameSnapshot {
+  return {
+    health: this.player.health,
+    ammo: this.player.ammo,
+    pulseCharge: this.player.pulseCharge,
+    activeSlot: this.player.activeSlot,
+    zone: this.map.id,
+  };
+}
+```
+
+- [ ] **Step 2: Build the React HUD**
+
+Create `/Users/justinwest/Repos/l0b0tonline/components/loom/hud/LoomHud.tsx`:
+```tsx
+import { useEffect, useState } from 'react';
+import { useCycleStore } from '../store/cycleStore';
+import type { GameSnapshot } from '../engine/gameLoop';
+
+interface LoomHudProps {
+  /** Polled each frame to get the latest game state. */
+  getSnapshot: () => GameSnapshot;
+}
+
+const WEAPON_NAMES: Record<number, string> = {
+  0: 'neural_pulse.exe',
+  1: 'drum_stick.exe',
+  2: 'branded_pen.exe',
+  3: 'spam_filter.exe',
+};
+
+export function LoomHud({ getSnapshot }: LoomHudProps) {
+  const [snap, setSnap] = useState<GameSnapshot>(() => getSnapshot());
+  const cycle = useCycleStore((s) => s.cycle);
+  const corruption = useCycleStore((s) => s.corruption);
+
+  useEffect(() => {
+    let h: number;
+    const tick = () => {
+      setSnap(getSnapshot());
+      h = requestAnimationFrame(tick);
+    };
+    h = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(h);
+  }, [getSnapshot]);
+
+  const simState =
+    corruption === 0 ? 'nominal'
+    : corruption === 1 ? 'drift detected'
+    : corruption === 2 ? 'BREACH'
+    : 'DISSOLVING';
+
+  const cycleNumber = 8491 + cycle;
+  const weaponName = WEAPON_NAMES[snap.activeSlot] ?? 'unknown.exe';
+
+  return (
+    <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-10 px-3 pb-2 font-mono text-[11px] leading-relaxed text-green-400">
+      <div>
+        [unit#88-E] &nbsp;
+        bio: <span className="text-green-300">{snap.health}%</span> &nbsp;/&nbsp;
+        queue: <span className="text-yellow-300">{snap.ammo}</span> &nbsp;/&nbsp;
+        active: <span className="text-green-300">{weaponName}</span> &nbsp;/&nbsp;
+        zone: <span className="text-green-300">{snap.zone}</span>
+      </div>
+      <div className="text-green-700">
+        &gt; cycle {cycleNumber} &nbsp;//&nbsp; simulation {simState} &nbsp;//&nbsp; surveillance: ON
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 3: Wire HUD into LOOMGame**
+
+Edit `/Users/justinwest/Repos/l0b0tonline/components/LOOMGame.tsx`. Add the HUD overlay. Replace the file with:
+
+```tsx
+import { useEffect, useRef, useState } from 'react';
+import { BootSequence } from './loom/hud/BootSequence';
+import { LoomHud } from './loom/hud/LoomHud';
+import { loadMap } from './loom/engine/mapLoader';
+import { GameLoop } from './loom/engine/gameLoop';
+
+interface LoomGameProps {
+  id: string;
+  onClose: () => void;
+}
+
+export default function LOOMGame(_props: LoomGameProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const loopRef = useRef<GameLoop | null>(null);
+  const [booted, setBooted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loopReady, setLoopReady] = useState(false);
+
+  useEffect(() => {
+    if (!booted || !canvasRef.current) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const map = await loadMap('cyc1_test');
+        if (cancelled || !canvasRef.current) return;
+        loopRef.current = new GameLoop(canvasRef.current, map);
+        loopRef.current.start();
+        setLoopReady(true);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+      loopRef.current?.stop();
+      loopRef.current = null;
+      setLoopReady(false);
+    };
+  }, [booted]);
+
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-black">
+      <canvas
+        ref={canvasRef}
+        className="h-full w-full"
+        style={{ imageRendering: 'pixelated' }}
+        width={640}
+        height={480}
+      />
+      {!booted && <BootSequence onComplete={() => setBooted(true)} />}
+      {loopReady && loopRef.current && (
+        <LoomHud getSnapshot={() => loopRef.current!.getSnapshot()} />
+      )}
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/80 font-mono text-sm text-red-400">
+          ERROR: {error}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 4: Manual smoke test**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev
+```
+Open the game. After boot:
+- The bottom-left of the LOOM window shows two lines of green text:
+  - Line 1: `[unit#88-E] bio: 100% / queue: 50 / active: branded_pen.exe / zone: cyc1_test`
+  - Line 2: `> cycle 8492 // simulation nominal // surveillance: ON`
+- Fire the Pen — `queue:` decrements
+- Take damage by waiting for an Intern to attack you (or hardcode `player.health -= 1` in `update` temporarily) — `bio:` decrements
+- Press F — pulse charge (not displayed yet — that's a Phase 4 enhancement) consumes silently
+
+Quit when done.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/justinwest/Repos/l0b0tonline
+git add components/loom/hud/LoomHud.tsx components/loom/engine/gameLoop.ts components/LOOMGame.tsx
+git commit -m "Add LoomHud J0IN 0S terminal HUD overlay (clean / corruption=0)
+
+React component overlaid on the WebGL canvas; subscribes to cycleStore
+and polls the GameLoop snapshot each rAF. Renders the spec'd two-line
+terminal layout with bio/queue/active/zone + cycle/sim-state/surveillance."
+```
+
+---
+
+## Task 1.9: Phase 1 integration playtest + final commit
+
+**Files:**
+- Create: `/Users/justinwest/Repos/LOOM-DOOM/.claude/worktrees/awesome-sutherland-aad854/docs/playtests/2026-04-27-phase-1-tracer-bullet.md`
 
 - [ ] **Step 1: Run the full integration test**
 
 ```bash
-./tools/build.sh && ./tools/play.sh CYC1_TEST
+cd /Users/justinwest/Repos/l0b0tonline
+npm run dev
 ```
+Open http://localhost:5173 in a browser. Boot J0IN 0S, run LOOM.EXE.
 
-Walk through this **playtest checklist** and verify each item works:
+Walk the **playtest checklist:**
 
 | # | Behavior | Expected |
 |---|---|---|
-| 1 | Game launches | GZDoom window opens, no fatal errors in console |
-| 2 | CycleManager registers | Console shows `LD_CycleManager: registered, cycle=1, corruption=0` |
-| 3 | Map loads | Player spawns inside CYC1_TEST room |
-| 4 | Player class | Press `~` console: `printinv` shows player has Clip 50 + BrandedPen |
-| 5 | Branded Pen visible | Weapon sprite (placeholder PEN) shows at bottom-center |
-| 6 | Branded Pen fires | Click fire (Ctrl/LMB) — bullet trace fires, Clip count drops |
-| 7 | Interns spawn | 3 visible in room, walk-toward / fire-at player |
-| 8 | Interns die | 1-2 Branded Pen shots kills one |
-| 9 | Neural Pulse fires | Press `F` — purple projectile flies from player view |
-| 10 | Neural Pulse damages | Pulse hitting an Intern reduces their HP |
-| 11 | Custom HUD renders | Bottom-left green text shows unit/bio/queue/active/zone + cycle line |
-| 12 | HUD updates | Take damage → bio drops; fire pen → queue drops |
-| 13 | All 3 Interns killable | All 3 die, no errors after combat ends |
+| 1 | LOOM window opens | from J0IN 0S desktop |
+| 2 | Boot sequence plays | green-on-black scrolling boot text, ends after ~3s |
+| 3 | Map renders | walls visible in 3D, greenish flat-shaded |
+| 4 | Pointer lock works | clicking the canvas locks mouse, esc unlocks |
+| 5 | WASD movement | player moves forward/back/strafe; collision with walls |
+| 6 | Mouse-look | turning works smoothly |
+| 7 | Branded Pen fires | mouse click drops `queue:` by 1 |
+| 8 | Branded Pen damages | hitting an Intern reduces their health (verify via 3 hits to kill) |
+| 9 | Neural Pulse fires | F key consumes pulse charge (verify with debug log if needed) |
+| 10 | Neural Pulse damages | F key hitting an Intern reduces their health (verify via 4 hits to kill) |
+| 11 | Interns chase | when player is within 8 tiles, Interns walk toward you |
+| 12 | Interns die | reaching 0 HP, they stop drawing (state='dead') |
+| 13 | HUD renders | bottom-left text shows bio/queue/active/zone + cycle line |
+| 14 | HUD updates real-time | bio drops on damage, queue drops on Pen fire |
+| 15 | Window closeable | close button kills the game cleanly, no console errors |
 
-If ALL 13 pass — Phase 1 is complete.
+If ALL 15 pass — Phase 1 complete.
 
-If any fail — go back to the relevant Task and fix.
+- [ ] **Step 2: Save Phase 1 playtest log**
 
-- [ ] **Step 2: Save playtest result**
-
-Create `docs/playtests/2026-04-27-phase-1-tracer-bullet.md` with this content:
+Create `/Users/justinwest/Repos/LOOM-DOOM/.claude/worktrees/awesome-sutherland-aad854/docs/playtests/2026-04-27-phase-1-tracer-bullet.md`:
 ```markdown
 # Phase 1 Tracer Bullet — Playtest Log
 
 **Date:** 2026-04-27
 **Tester:** [your name / "agent" / "claude"]
-**Build:** loom-doom.pk3 commit [paste current git short hash]
+**l0b0tonline commit:** [paste current git short hash from l0b0tonline]
 
 ## Checklist
 
 | # | Behavior | Result |
 |---|---|---|
-| 1 | Game launches without fatal errors | PASS / FAIL |
-| 2 | CycleManager registers (console line visible) | PASS / FAIL |
-| 3 | Map loads | PASS / FAIL |
-| 4 | Player has Clip 50 + BrandedPen | PASS / FAIL |
-| 5 | Branded Pen sprite visible | PASS / FAIL |
-| 6 | Branded Pen fires + Clip drops | PASS / FAIL |
-| 7 | 3 Interns spawn | PASS / FAIL |
-| 8 | Interns die from Branded Pen | PASS / FAIL |
-| 9 | Neural Pulse fires from F key | PASS / FAIL |
-| 10 | Neural Pulse damages Interns | PASS / FAIL |
-| 11 | Custom HUD renders bottom-left | PASS / FAIL |
-| 12 | HUD updates in real time | PASS / FAIL |
-| 13 | All 3 Interns killable | PASS / FAIL |
+| 1 | LOOM window opens | PASS / FAIL |
+| 2 | Boot sequence plays | PASS / FAIL |
+| 3 | Map renders | PASS / FAIL |
+| 4 | Pointer lock works | PASS / FAIL |
+| 5 | WASD movement | PASS / FAIL |
+| 6 | Mouse-look | PASS / FAIL |
+| 7 | Branded Pen fires | PASS / FAIL |
+| 8 | Branded Pen damages | PASS / FAIL |
+| 9 | Neural Pulse fires | PASS / FAIL |
+| 10 | Neural Pulse damages | PASS / FAIL |
+| 11 | Interns chase | PASS / FAIL |
+| 12 | Interns die | PASS / FAIL |
+| 13 | HUD renders | PASS / FAIL |
+| 14 | HUD updates real-time | PASS / FAIL |
+| 15 | Window closeable | PASS / FAIL |
 
 ## Notes / known issues
 
@@ -1471,14 +2278,15 @@ Create `docs/playtests/2026-04-27-phase-1-tracer-bullet.md` with this content:
 
 ## Phase 1 Definition of Done
 
-[X] All 13 checklist items pass — tracer bullet complete.
+[X] All 15 checklist items pass — tracer bullet complete.
 ```
 
-Replace `PASS / FAIL` with actual results from the playtest. Keep this committed as historical record.
+Replace PASS / FAIL with actual results.
 
 - [ ] **Step 3: Commit playtest log**
 
 ```bash
+cd /Users/justinwest/Repos/LOOM-DOOM/.claude/worktrees/awesome-sutherland-aad854
 mkdir -p docs/playtests
 git add docs/playtests/2026-04-27-phase-1-tracer-bullet.md
 git commit -m "Add Phase 1 tracer-bullet playtest log (DoD met)"
@@ -1487,10 +2295,12 @@ git commit -m "Add Phase 1 tracer-bullet playtest log (DoD met)"
 - [ ] **Step 4: Verify branch state**
 
 ```bash
-git log --oneline | head -20
-git status
+cd /Users/justinwest/Repos/LOOM-DOOM/.claude/worktrees/awesome-sutherland-aad854
+git log --oneline | head -10
+cd /Users/justinwest/Repos/l0b0tonline
+git log --oneline | head -15
 ```
-Expected: clean tree, ~14-16 commits since the spec commit, all Phase-0/Phase-1 task commits visible.
+Both repos: clean trees, expected commits visible.
 
 ---
 
@@ -1500,35 +2310,42 @@ Spec coverage check (against `docs/superpowers/specs/2026-04-27-loom-doom-design
 
 | Spec section | Phase 0+1 coverage |
 |---|---|
-| §3.1 Identity (DEFECTIVE UNIT #88-E) | ✅ LD_Player class established; HUD shows `[unit#88-E]` |
-| §3.4 C-reveal | ❌ Out of scope for Phase 1 — Phase 5 work |
-| §4 Cycle structure | ✅ partial — cycle 1 active; LD_CycleManager singleton in place |
-| §5.1 Weapon roster | ✅ partial — Neural Pulse (Slot 0) + Branded Pen (Slot 2) implemented |
-| §5.2 Enemy taxonomy | ✅ partial — Intern (Cycle 1 basic) implemented |
+| §3.1 Identity (DEFECTIVE UNIT #88-E) | ✅ HUD shows `[unit#88-E]`; LOOMGame component renders with that framing |
+| §3.4 C-reveal | ❌ Out of scope — Phase 5 |
+| §4 Cycle structure | ✅ partial — cycle 1 active; CycleStore Zustand slice in place |
+| §5.1 Weapon roster | ✅ partial — Neural Pulse (Slot 0) + Branded Pen (Slot 2) |
+| §5.2 Enemy taxonomy | ✅ partial — Intern (Cycle 1 basic) |
 | §6.1 HUD J0IN 0S terminal | ✅ clean (corruption=0) mode; corruption modes deferred to Phase 3+ |
 | §6.2 Audio | ❌ Phase 6 — placeholder only, no real audio |
 | §6.3 Maps | ✅ partial — 1 placeholder map; rest in Phase 2+ |
-| §7 Architecture | ✅ Repo layout, build pipeline, validate scaffold all done per spec |
-| §8 Phased build plan, Phase 0 | ✅ DoD met (Task 0.6 Step 4) |
-| §8 Phased build plan, Phase 1 | ✅ DoD met (Task 1.8 Step 1) |
+| §7 Architecture | ✅ Repo layout, raycaster, renderer, game loop, HUD all done per spec |
+| §7.4 Render pipeline | ✅ flat-shaded walls + sprite billboarding via z-buffer; textures + post-FX in later phases |
+| §7.5 Validation | ✅ Vitest tests for cycleStore + raycaster; type-check clean; manual playtest log |
+| §8 Phase 0 DoD | ✅ Task 0.5 |
+| §8 Phase 1 DoD | ✅ Task 1.9 |
 | §9 Risk inventory | n/a — meta |
+| §10 Out of scope | ✅ enforced; no character-select / multiplayer / etc. |
 
-Placeholder scan: searched the plan for "TBD" / "TODO" / "implement later" — none found. All steps have actual content. ✅
+Placeholder scan: `void DAMAGE` markers in Tasks 1.5–1.6 are intentional (signal Task 1.7 wires them up); replaced with real usage in 1.7. No "TODO" / "TBD" left at the end of Phase 1. ✅
 
-Type consistency: class names verified across tasks:
-- `LD_CycleManager` — Task 1.2 + lookup in 1.7 (consistent)
-- `LD_Player` — Task 1.3 + reference in MAPINFO (consistent)
-- `BrandedPen` — Task 1.4 + reference in `LD_Player.StartItem` in 1.3 (consistent — note: 1.3 references it before it exists in 1.4, this is fine because GZDoom resolves at runtime)
-- `Intern` — Task 1.5, no other references needed (it's auto-spawned via `replaces ZombieMan`)
-- `NeuralPulseProjectile` + `NeuralPulseHandler` — Task 1.6, handler registered in MAPINFO (consistent)
-- `LD_StatusBar` — Task 1.7, registered in MAPINFO statusbarclass (consistent)
+Type consistency: class/interface names verified across tasks:
+- `CycleStore` / `useCycleStore` — Task 1.1 + reference in Task 1.8 (consistent)
+- `LoomMap` / `MapThing` / `PlayerState` — Task 1.2 (defined) + used in 1.3, 1.4, 1.5, 1.6, 1.7
+- `IWeapon` / `BrandedPen` / `NeuralPulse` — Task 1.5 + 1.6 + reference in 1.7
+- `Intern` — Task 1.7 + referenced in 1.5, 1.6 weapon updates
+- `GameLoop` / `GameSnapshot` — Task 1.4 (initial) + extended in 1.7, 1.8
+- `LoomHud` — Task 1.8
 
-All type and method references match. ✅
+All references match. ✅
 
 ---
 
 # Done condition for this plan
 
-Phase 1 complete when Task 1.8 Step 1's 13-item playtest checklist all pass. At that point, `loom-doom.pk3` is publishable as a "tracer bullet" demo and the project is unblocked for Phase 2 (the full Cycle 1 vertical slice).
+Phase 1 complete when Task 1.9 Step 1's 15-item playtest checklist all pass. At that point:
+- LOOM is a clickable, runnable app inside J0IN 0S at l0b0tonline
+- Players can navigate, fight one enemy type, see the J0IN 0S terminal HUD
+- The full subsystem map (raycaster, renderer, game loop, player, weapons, enemies, HUD, cycle store) is wired together end-to-end
+- The mod is genuinely playable in the browser — Path 3 is validated as the right call
 
-The next plan, when this one is done: `2026-XX-XX-loom-doom-phase-2.md` covering Cycle 1 maps + remaining Cycle 1 weapons + remaining Cycle 1 enemies + the HR Manager boss.
+The next plan, when this one is done: `2026-XX-XX-loom-phase-2.md` covering Cycle 1 maps + remaining Cycle 1 weapons (Drum Stick, Spam Filter, Industrial Shredder) + remaining Cycle 1 enemies (Account Executive, Recruiter, HR Manager boss) + cycle-1 → cycle-2 transition.
