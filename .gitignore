@@ -1,0 +1,14 @@
+# Build outputs
+dist/
+
+# Brainstorm session content (visual companion mockups)
+.superpowers/
+
+# macOS
+.DS_Store
+
+# Editor / IDE local state
+.vscode/
+.idea/
+*.swp
+*~
