@@ -1446,7 +1446,7 @@ Key additions over Phase 4 spec:
 - The Hand phase 3 cursor takeover: skipped in test mode (Playwright can't reliably trigger pointer lock). The test instead damages The Hand until dead via the same hook, asserts the boss enters phase 3 first (visible by some marker — e.g., a `getPhase()` method or a state field)
 - After The Hand dies, expect the C-reveal cinematic: assert visibility of `NULL_ENTITY / SAINT_L0B0T` text after the title-flip stage (~5s in)
 - Assert `OK / ACCEPT` text appears after the credits stage
-- Press a key to dismiss the cinematic; assert returned to boot; assert `cycleStore.identityRevealed` was reset to false (per spec — fresh boot = unrevealed identity)
+- Press a key to dismiss the cinematic; assert returned to boot. **Note: `identityRevealed` PERSISTS across the boot return** (Phase 5 review I-2 fix — `LOOMGame.onComplete` calls `reset()` then `revealIdentity()` so the HUD's `[NULL_ENTITY]` strikethrough telegraphs "you've already seen the truth" on replay). Cycle and corruption ARE reset (`cycle === 1`, `corruption === 0`). Assert `cycleStore.identityRevealed === true`.
 - Assert L-907 entry is now in `LOOM_LOGS` (or appears in the J0IN 0S filesystem if the unlocks integration shipped)
 
 Use `test.setTimeout(180_000)` since this is the longest test. Target runtime: ~30s.
