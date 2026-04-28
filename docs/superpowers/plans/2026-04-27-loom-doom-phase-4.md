@@ -2481,8 +2481,10 @@ function makeCtx(playerX: number, playerY: number, otherEnemies: IEnemy[] = []) 
 }
 
 describe('BrandAmbassador', () => {
-  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); });
-  afterEach(() => { vi.useRealTimers(); });
+  // Note: vi.setSystemTime() advances Date.now() but NOT performance.now() in
+  // Vitest 4. The implementation reads performance.now() to gate cooldowns,
+  // so we must mock performance.now() directly via vi.spyOn(). Pattern matches
+  // surveillanceDrone.test.ts (Task 4.8 review fix).
 
   it('isBoss flag is true', () => {
     const b = new BrandAmbassador(10, 10);
@@ -2501,80 +2503,108 @@ describe('BrandAmbassador', () => {
 
   describe('resurrection mechanic', () => {
     it('resurrects a dead, non-rebranded enemy within range every 6s', () => {
-      const b = new BrandAmbassador(10, 10);
-      const corpse = new Intern(11, 10);
-      corpse.state = 'dead';
-      corpse.health = 0;
-      const others: IEnemy[] = [corpse];
-      const { ctx } = makeCtx(15, 15, others);
-      // Inject otherEnemies — the BrandAmbassador reads them via a sibling field.
-      // For Phase 4 we use the (test-only) enemiesProvider hook; see implementation.
-      b.setEnemyList(others);
+      let virtualNow = 0;
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => virtualNow);
+      try {
+        const b = new BrandAmbassador(10, 10);
+        const corpse = new Intern(11, 10);
+        corpse.state = 'dead';
+        corpse.health = 0;
+        const others: IEnemy[] = [corpse];
+        const { ctx } = makeCtx(15, 15, others);
+        b.setEnemyList(others);
 
-      // Initial update — no resurrection yet (cooldown not elapsed).
-      b.update(0.016, ctx);
-      expect(corpse.state).toBe('dead');
+        // Initial update — no resurrection yet (cooldown not elapsed).
+        b.update(0.016, ctx);
+        expect(corpse.state).toBe('dead');
 
-      // Advance 6s and update again.
-      vi.setSystemTime(6500);
-      b.update(0.016, ctx);
-      expect(corpse.state).toBe('chase');
-      // Intern max HP is 20; resurrected at 50% = floor(10) = 10. We assert
-      // `> 0` to stay robust if Intern's HEALTH is later tuned — the
-      // implementer subagent should verify Intern HEALTH and tighten this
-      // assertion to `toBe(10)` (or whatever floor(HEALTH/2) is) once the
-      // values are confirmed.
-      expect(corpse.health).toBeGreaterThan(0);
-      expect(corpse.rebranded).toBe(true);
+        // Advance virtual performance.now past 6s cooldown.
+        virtualNow = 6500;
+        b.update(0.016, ctx);
+        expect(corpse.state).toBe('chase');
+        // Intern max HP is 20; resurrected at 50% = floor(10) = 10. We assert
+        // `> 0` to stay robust if Intern's HEALTH is later tuned — the
+        // implementer subagent should verify Intern HEALTH and tighten this
+        // assertion to `toBe(10)` (or whatever floor(HEALTH/2) is) once the
+        // values are confirmed.
+        expect(corpse.health).toBeGreaterThan(0);
+        expect(corpse.rebranded).toBe(true);
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
 
     it('does not resurrect an already-rebranded corpse', () => {
-      const b = new BrandAmbassador(10, 10);
-      const corpse = new Intern(11, 10);
-      corpse.state = 'dead';
-      corpse.health = 0;
-      corpse.rebranded = true;
-      b.setEnemyList([corpse]);
-      const { ctx } = makeCtx(15, 15, [corpse]);
-      vi.setSystemTime(6500);
-      b.update(0.016, ctx);
-      expect(corpse.state).toBe('dead');
+      let virtualNow = 0;
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => virtualNow);
+      try {
+        const b = new BrandAmbassador(10, 10);
+        const corpse = new Intern(11, 10);
+        corpse.state = 'dead';
+        corpse.health = 0;
+        corpse.rebranded = true;
+        b.setEnemyList([corpse]);
+        const { ctx } = makeCtx(15, 15, [corpse]);
+        virtualNow = 6500;
+        b.update(0.016, ctx);
+        expect(corpse.state).toBe('dead');
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
 
     it('does not resurrect a corpse beyond 8 tile range', () => {
-      const b = new BrandAmbassador(10, 10);
-      const corpse = new Intern(20, 10); // 10 tiles east — out of range
-      corpse.state = 'dead';
-      corpse.health = 0;
-      b.setEnemyList([corpse]);
-      const { ctx } = makeCtx(15, 15, [corpse]);
-      vi.setSystemTime(6500);
-      b.update(0.016, ctx);
-      expect(corpse.state).toBe('dead');
+      let virtualNow = 0;
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => virtualNow);
+      try {
+        const b = new BrandAmbassador(10, 10);
+        const corpse = new Intern(20, 10); // 10 tiles east — out of range
+        corpse.state = 'dead';
+        corpse.health = 0;
+        b.setEnemyList([corpse]);
+        const { ctx } = makeCtx(15, 15, [corpse]);
+        virtualNow = 6500;
+        b.update(0.016, ctx);
+        expect(corpse.state).toBe('dead');
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
   });
 
   describe('going viral attack', () => {
     it('fires 4 pulses in a cross pattern every 4s', () => {
-      const b = new BrandAmbassador(10, 10);
-      b.setEnemyList([]);
-      const { ctx, spawned } = makeCtx(15, 15);
-      b.update(0.016, ctx);
-      expect(spawned.length).toBe(4);
+      let virtualNow = 0;
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => virtualNow);
+      try {
+        const b = new BrandAmbassador(10, 10);
+        b.setEnemyList([]);
+        const { ctx, spawned } = makeCtx(15, 15);
+        b.update(0.016, ctx);
+        expect(spawned.length).toBe(4);
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
 
     it('respects 4s cooldown', () => {
-      const b = new BrandAmbassador(10, 10);
-      b.setEnemyList([]);
-      const { ctx, spawned } = makeCtx(15, 15);
-      b.update(0.016, ctx);
-      expect(spawned.length).toBe(4);
-      vi.setSystemTime(2000);
-      b.update(0.016, ctx);
-      expect(spawned.length).toBe(4); // still 4 (no second burst yet)
-      vi.setSystemTime(4500);
-      b.update(0.016, ctx);
-      expect(spawned.length).toBe(8); // second burst
+      let virtualNow = 0;
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => virtualNow);
+      try {
+        const b = new BrandAmbassador(10, 10);
+        b.setEnemyList([]);
+        const { ctx, spawned } = makeCtx(15, 15);
+        b.update(0.016, ctx);
+        expect(spawned.length).toBe(4);
+        virtualNow = 2000;
+        b.update(0.016, ctx);
+        expect(spawned.length).toBe(4); // still 4 (cooldown holds)
+        virtualNow = 4500;
+        b.update(0.016, ctx);
+        expect(spawned.length).toBe(8); // second burst lands
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
   });
 });
