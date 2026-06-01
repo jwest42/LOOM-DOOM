@@ -1368,6 +1368,50 @@ describe('spriteService — synchronous getter (Phase 7 §4.4, #172)', () => {
     expect(spriteService.getSprite('enemies.intern')).toBe(fakeBitmap);
   });
 });
+
+// Proves the *populated* path: a decoded sprite actually writes pixels, instead
+// of the loader/service passing while nothing ever renders. blitDecodedSprite is
+// pure (operates on already-decoded RGBA) so it needs no canvas.
+describe('blitDecodedSprite — populated sprite path (Phase 7 §4.4, #172)', () => {
+  // 2×2 single-frame source: opaque red at (0,0), transparent elsewhere.
+  const src = {
+    width: 2, height: 2,
+    data: new Uint8ClampedArray([
+      255, 0, 0, 255,   0, 0, 0, 0,
+      0, 0, 0, 0,       0, 0, 0, 0,
+    ]),
+  };
+  const W = 8, H = 8;
+
+  it('writes opaque texels into the framebuffer (a loaded sprite renders)', () => {
+    const fb = new Uint8Array(W * H * 4);
+    const z = new Float32Array(W).fill(Infinity);
+    const drew = blitDecodedSprite(fb, z, src, 0, 1, 1.0, 0, 1, 0, 1, W, H);
+    expect(drew).toBe(true);
+    expect([fb[0], fb[1], fb[2], fb[3]]).toEqual([255, 0, 0, 255]);
+  });
+
+  it('skips columns occluded by a nearer wall (z-mask)', () => {
+    const fb = new Uint8Array(W * H * 4);
+    const z = new Float32Array(W).fill(0.5); // wall at 0.5 is nearer than sprite at 1.0
+    blitDecodedSprite(fb, z, src, 0, 1, 1.0, 0, 1, 0, 1, W, H);
+    expect(fb.every((b) => b === 0)).toBe(true);
+  });
+
+  it('skips transparent texels (alpha test lets the background show)', () => {
+    const fb = new Uint8Array(W * H * 4);
+    const z = new Float32Array(W).fill(Infinity);
+    const clear = { width: 1, height: 1, data: new Uint8ClampedArray([255, 0, 0, 0]) };
+    blitDecodedSprite(fb, z, clear, 0, 1, 1.0, 0, 1, 0, 1, W, H);
+    expect(fb.every((b) => b === 0)).toBe(true);
+  });
+});
+```
+
+Add the import at the top of the file alongside the others:
+
+```typescript
+import { blitDecodedSprite } from './renderer';
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1377,7 +1421,7 @@ Run:
 npx vitest run components/loom/engine/spriteLoader.test.ts
 ```
 
-Expected: FAIL on the new tests (spriteService doesn't exist).
+Expected: FAIL on the new tests (spriteService + `blitDecodedSprite` don't exist yet).
 
 - [ ] **Step 3: Implement spriteService**
 
@@ -1410,33 +1454,99 @@ import { spriteLoader } from './loom/engine/spriteLoader';
 spriteLoader.loadAll();
 ```
 
-- [ ] **Step 5: Renderer integration — sprite fallback path**
+- [ ] **Step 5: Renderer integration — sprite blit path**
 
-The renderer currently fills enemy rects pixel-by-pixel with `placeholderColor`. With a sprite loaded, we want a different path: blit the bitmap into the framebuffer at the sprite-quad coordinates.
+The renderer currently fills enemy rects pixel-by-pixel with `placeholderColor`. With a sprite loaded we take a different path: sample the sprite frame and write its pixels into the framebuffer across the billboard's screen rect, masked by the z-buffer exactly like the rect path. This makes the slot **functional**, not merely **present** — once a PNG exists at the manifest path it renders with **zero code changes**, satisfying the Phase 7 asset-slot acceptance goal. With no PNG, `getSprite` returns `null`, `blitSprite` is never called, and the rect fallback runs, so the empty-state e2e is unaffected.
 
-Add a helper near the top of `renderer.ts`:
+A software renderer writing into a `Uint8Array` cannot sample an opaque `ImageBitmap` directly, so we rasterize each bitmap into an RGBA buffer once and memoize it (the `drawImage`/`getImageData` cost is paid on the first frame a given sprite appears, never per-frame after). The pure sampling step is split into `blitDecodedSprite` so it is unit-testable with no canvas.
+
+Add near the top of `renderer.ts`:
 
 ```typescript
 import { spriteService } from './spriteService';
 
+interface DecodedSprite { data: Uint8ClampedArray; width: number; height: number; }
+
+// ImageBitmap → RGBA pixels, decoded once per bitmap and cached. WeakMap keeps
+// it GC-friendly: when the bitmap is evicted its decode is collected with it.
+const decodeCache = new WeakMap<ImageBitmap, DecodedSprite>();
+
+function decodeSprite(bitmap: ImageBitmap): DecodedSprite | null {
+  const cached = decodeCache.get(bitmap);
+  if (cached) return cached;
+  if (typeof OffscreenCanvas === 'undefined') return null; // non-browser (unit tests hit blitDecodedSprite directly)
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.drawImage(bitmap, 0, 0);
+  const img = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+  const decoded: DecodedSprite = { data: img.data, width: img.width, height: img.height };
+  decodeCache.set(bitmap, decoded);
+  return decoded;
+}
+
 /**
- * Blit a sprite frame into the framebuffer at the given screen rect, masking
- * via zBuffer. Returns true if the blit happened, false if no sprite was
- * available (caller should fall back to colored rect).
+ * Sample one frame of a decoded sprite sheet (frames packed horizontally) and
+ * blit it into the framebuffer across [drawStartX..drawEndX] × [drawStartY..drawEndY],
+ * nearest-neighbour scaled. Per destination column, skip when a nearer wall
+ * occludes it (`spriteDepth >= zBuffer[x]`); per texel, skip when alpha < 128.
+ * Returns true once it has handled the billboard (caller skips the rect fallback).
+ */
+export function blitDecodedSprite(
+  framebuffer: Uint8Array,
+  zBuffer: Float32Array,
+  src: DecodedSprite,
+  frame: number, frameCount: number,
+  spriteDepth: number,
+  drawStartX: number, drawEndX: number,
+  drawStartY: number, drawEndY: number,
+  internalW: number, internalH: number,
+): boolean {
+  const frameW = (src.width / frameCount) | 0;
+  const srcX0 = (frame % frameCount) * frameW;
+  const spanX = drawEndX - drawStartX;
+  const spanY = drawEndY - drawStartY;
+  if (frameW <= 0 || spanX <= 0 || spanY <= 0) return false;
+
+  for (let x = drawStartX; x <= drawEndX; x++) {
+    if (x < 0 || x >= internalW) continue;
+    if (spriteDepth >= zBuffer[x]) continue; // occluded by a nearer wall column
+    const u = Math.min(((x - drawStartX) / spanX * frameW) | 0, frameW - 1);
+    const sx = srcX0 + u;
+    for (let y = drawStartY; y <= drawEndY; y++) {
+      if (y < 0 || y >= internalH) continue;
+      const v = Math.min(((y - drawStartY) / spanY * src.height) | 0, src.height - 1);
+      const s = (v * src.width + sx) * 4;
+      if (src.data[s + 3] < 128) continue; // transparent texel — let the background show
+      const idx = (y * internalW + x) * 4;
+      framebuffer[idx]     = src.data[s];
+      framebuffer[idx + 1] = src.data[s + 1];
+      framebuffer[idx + 2] = src.data[s + 2];
+      framebuffer[idx + 3] = 255;
+    }
+  }
+  return true;
+}
+
+/**
+ * Blit a sprite frame into the framebuffer at the given screen rect. Returns
+ * true if a sprite asset handled this billboard, false if no sprite pixels were
+ * available (caller should fall back to the colored rect).
  */
 function blitSprite(
   framebuffer: Uint8Array,
   zBuffer: Float32Array,
   bitmap: ImageBitmap,
+  frame: number, frameCount: number,
+  spriteDepth: number,
   drawStartX: number, drawEndX: number,
   drawStartY: number, drawEndY: number,
-  cx: number,
   internalW: number, internalH: number,
 ): boolean {
-  // For now, sprite path is a stub — Phase 8 will implement actual ImageBitmap
-  // → framebuffer pixel transfer. Return false to fall back to rect during
-  // Phase 7 (the test verifies rect path stays the default with no assets).
-  return false;
+  const src = decodeSprite(bitmap);
+  if (!src) return false;
+  return blitDecodedSprite(framebuffer, zBuffer, src, frame, frameCount,
+    spriteDepth, drawStartX, drawEndX, drawStartY, drawEndY, internalW, internalH);
 }
 ```
 
@@ -1444,15 +1554,19 @@ In the enemy billboard pass, before the existing rect-fill loop, add:
 
 ```typescript
 const bitmap = e.spriteId ? spriteService.getSprite(e.spriteId) : null;
+// transformY is the perpendicular sprite depth already computed for the billboard
+// projection — the same value the rect path compares against zBuffer[x]. animFrame
+// / frameCount default to a single static frame for entities not yet animated.
 const used = bitmap ? blitSprite(this.framebuffer, this.zBuffer, bitmap,
-  drawStartX, drawEndX, drawStartY, drawEndY, cx, INTERNAL_W, INTERNAL_H) : false;
+  e.animFrame ?? 0, e.frameCount ?? 1, transformY,
+  drawStartX, drawEndX, drawStartY, drawEndY, INTERNAL_W, INTERNAL_H) : false;
 if (!used) {
   // existing palette-aware rect fill (from Task 3)
   for (let x = drawStartX; x <= drawEndX; x++) { /* ... */ }
 }
 ```
 
-Add `spriteId?: string;` to `IEnemy` and `IProjectile` interfaces alongside `paletteRole`.
+Add `spriteId?: string;` to `IEnemy` and `IProjectile` interfaces alongside `paletteRole` (and pass `animFrame` / `frameCount` if your entity already tracks an animation frame — otherwise the `?? 0` / `?? 1` defaults blit the first frame).
 
 - [ ] **Step 6: Run tests + e2e**
 
@@ -1479,7 +1593,7 @@ git add components/loom/engine/spriteService.ts \
         components/loom/entities/enemies/Enemy.ts \
         components/loom/entities/projectiles/Projectile.ts \
         components/LOOMGame.tsx
-git commit -m "Add spriteService + renderer fallback path (Phase 7 §4.4, #172)"
+git commit -m "Add spriteService + renderer sprite blit path with rect fallback (Phase 7 §4.4, #172)"
 ```
 
 ---
@@ -2783,6 +2897,54 @@ describe('useTouchInput (Phase 7 §4.1, #175)', () => {
     const { result } = renderHook(() => useTouchInput());
     expect(result.current.active).toBe(false);
   });
+
+  // changedTouches is the only field the hook reads, so a minimal stub is enough.
+  const mkTouch = (id: number, x: number, y: number) =>
+    ({ identifier: id, clientX: x, clientY: y } as Touch);
+  const fireTouch = (type: string, ...touches: Touch[]) =>
+    Object.assign(new Event(type), { changedTouches: touches }) as unknown as TouchEvent;
+
+  const enableTouch = () => {
+    (window as any).ontouchstart = () => {};
+    Object.defineProperty(navigator, 'maxTouchPoints', { value: 5, configurable: true });
+    Object.defineProperty(window, 'innerWidth', { value: 800, configurable: true });
+    Object.defineProperty(window, 'location', { value: { search: '' }, configurable: true });
+  };
+
+  it('left-half drag populates moveAxes so a touch-only player can move', () => {
+    enableTouch();
+    const { result } = renderHook(() => useTouchInput());
+
+    act(() => {
+      window.dispatchEvent(fireTouch('touchstart', mkTouch(0, 200, 300))); // left zone anchor
+      window.dispatchEvent(fireTouch('touchmove', mkTouch(0, 248, 348)));  // push down-right
+    });
+    expect(result.current.moveAxes.x).toBeGreaterThan(0);
+    expect(result.current.moveAxes.y).toBeGreaterThan(0);
+
+    act(() => {
+      window.dispatchEvent(fireTouch('touchend', mkTouch(0, 248, 348)));
+    });
+    expect(result.current.moveAxes).toEqual({ x: 0, y: 0 }); // recenters on release
+  });
+
+  it('right-half drag drives lookDelta and holds fire concurrently with movement', () => {
+    enableTouch();
+    const { result } = renderHook(() => useTouchInput());
+
+    act(() => {
+      window.dispatchEvent(fireTouch('touchstart', mkTouch(0, 200, 300))); // left: move
+      window.dispatchEvent(fireTouch('touchstart', mkTouch(1, 600, 300))); // right: look + fire
+    });
+    expect(result.current.isFirePressed).toBe(true);
+
+    act(() => {
+      window.dispatchEvent(fireTouch('touchmove', mkTouch(0, 248, 300))); // strafe right
+      window.dispatchEvent(fireTouch('touchmove', mkTouch(1, 630, 300))); // look right
+    });
+    expect(result.current.moveAxes.x).toBeGreaterThan(0); // both thumbs tracked independently
+    expect(result.current.lookDelta.x).toBe(30);
+  });
 });
 ```
 
@@ -2799,13 +2961,18 @@ import { useEffect, useState, useRef } from 'react';
 
 interface TouchInputState {
   active: boolean;
-  /** Look delta from left-half drag (pixels per frame) */
+  /** Look delta from a right-half drag (pixels since the last move event) */
   lookDelta: { x: number; y: number };
-  /** Move axes from left thumb joystick (-1..1) */
+  /** Movement from the left-half virtual joystick, each axis in -1..1 */
   moveAxes: { x: number; y: number };
-  /** True while right-half is held (continuous fire) */
+  /** True while a right-half touch is held (tap/hold to fire) */
   isFirePressed: boolean;
 }
+
+/** Pixels of left-thumb travel that map to full joystick deflection (±1). */
+const JOYSTICK_RADIUS = 48;
+
+const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
 
 export function useTouchInput(): TouchInputState {
   const isForceMouse = typeof window !== 'undefined' &&
@@ -2822,42 +2989,71 @@ export function useTouchInput(): TouchInputState {
     isFirePressed: false,
   });
 
-  const lastTouchRef = useRef<Touch | null>(null);
+  // Track the two thumbs independently, keyed by Touch.identifier, so a player
+  // can move (left) and look/fire (right) at the same time. A single shared
+  // "last touch" ref would let one thumb clobber the other's deltas.
+  const moveTouch = useRef<{ id: number; ox: number; oy: number } | null>(null);
+  const lookTouch = useRef<{ id: number; lastX: number; lastY: number } | null>(null);
 
   useEffect(() => {
     if (!active) return;
+    const isLeft = (clientX: number) => clientX < window.innerWidth / 2;
 
     const onTouchStart = (e: TouchEvent) => {
-      const t = e.changedTouches[0];
-      // right-half = fire
-      if (t.clientX > window.innerWidth / 2) {
-        setState((s) => ({ ...s, isFirePressed: true }));
+      for (const t of Array.from(e.changedTouches)) {
+        if (isLeft(t.clientX)) {
+          // Left thumb anchors the movement joystick at its touch-down point.
+          moveTouch.current = { id: t.identifier, ox: t.clientX, oy: t.clientY };
+        } else {
+          // Right thumb starts a look-drag and holds fire.
+          lookTouch.current = { id: t.identifier, lastX: t.clientX, lastY: t.clientY };
+          setState((s) => ({ ...s, isFirePressed: true }));
+        }
       }
-      lastTouchRef.current = t;
     };
 
     const onTouchMove = (e: TouchEvent) => {
-      const t = e.changedTouches[0];
-      if (lastTouchRef.current && t.clientX < window.innerWidth / 2) {
-        const dx = t.clientX - lastTouchRef.current.clientX;
-        const dy = t.clientY - lastTouchRef.current.clientY;
-        setState((s) => ({ ...s, lookDelta: { x: dx, y: dy } }));
+      for (const t of Array.from(e.changedTouches)) {
+        const mv = moveTouch.current;
+        if (mv && t.identifier === mv.id) {
+          // Offset from the anchor → normalized movement axes (y up = forward).
+          const x = clamp((t.clientX - mv.ox) / JOYSTICK_RADIUS, -1, 1);
+          const y = clamp((t.clientY - mv.oy) / JOYSTICK_RADIUS, -1, 1);
+          setState((s) => ({ ...s, moveAxes: { x, y } }));
+          continue;
+        }
+        const lk = lookTouch.current;
+        if (lk && t.identifier === lk.id) {
+          const dx = t.clientX - lk.lastX;
+          const dy = t.clientY - lk.lastY;
+          lk.lastX = t.clientX;
+          lk.lastY = t.clientY;
+          setState((s) => ({ ...s, lookDelta: { x: dx, y: dy } }));
+        }
       }
-      lastTouchRef.current = t;
     };
 
-    const onTouchEnd = () => {
-      setState((s) => ({ ...s, isFirePressed: false, lookDelta: { x: 0, y: 0 } }));
-      lastTouchRef.current = null;
+    const onTouchEnd = (e: TouchEvent) => {
+      for (const t of Array.from(e.changedTouches)) {
+        if (moveTouch.current && t.identifier === moveTouch.current.id) {
+          moveTouch.current = null;
+          setState((s) => ({ ...s, moveAxes: { x: 0, y: 0 } })); // recenter joystick on release
+        } else if (lookTouch.current && t.identifier === lookTouch.current.id) {
+          lookTouch.current = null;
+          setState((s) => ({ ...s, isFirePressed: false, lookDelta: { x: 0, y: 0 } }));
+        }
+      }
     };
 
     window.addEventListener('touchstart', onTouchStart, { passive: true });
     window.addEventListener('touchmove', onTouchMove, { passive: true });
     window.addEventListener('touchend', onTouchEnd, { passive: true });
+    window.addEventListener('touchcancel', onTouchEnd, { passive: true });
     return () => {
       window.removeEventListener('touchstart', onTouchStart);
       window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', onTouchEnd);
+      window.removeEventListener('touchcancel', onTouchEnd);
     };
   }, [active]);
 
@@ -2865,7 +3061,7 @@ export function useTouchInput(): TouchInputState {
 }
 ```
 
-> **Note:** This hook returns the raw touch state. Wiring it into the existing input system (so `gameLoop` reads `lookDelta` / `isFirePressed` from this hook on each tick) is the second half of the integration. Add a small `setTouchState` setter on the existing input module and call it from `LOOMGame.tsx` on each render: `useInput().setTouchState(touchState)`.
+> **Note:** This hook returns the raw touch state. Wiring it into the existing input system is the second half of the integration: on each tick `gameLoop` reads **`moveAxes`, `lookDelta`, and `isFirePressed`** from this hook. `moveAxes.y`/`moveAxes.x` feed the same forward/strafe channel the keyboard `WASD` handler writes and `lookDelta` feeds the same yaw/pitch channel as the mouse — so a touch-only player can move *and* look, not just fire. Add a small `setTouchState` setter on the existing input module and call it from `LOOMGame.tsx` on each render: `useInput().setTouchState(touchState)`.
 
 - [ ] **Step 4: Run tests + commit**
 
